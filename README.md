@@ -16,6 +16,8 @@ This image is based on PostgreSQL v12.4. It will be periodically rebuilt acordin
 
 The stable tag for this image is `12.4-latest`. When the image is rebuilt [patch](https://semver.org/) updates to PostgreSQL will be incorporated along with operating system updates.
 
+See the [release notes](./RELEASE.md) for more information and any other unique tags. 
+
 ## Build
 
 This image is built as per the [workflow](.github/workflows/image.yaml) and the OpenShift [templates](./openshift/templates).

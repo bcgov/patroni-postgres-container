@@ -1,12 +1,5 @@
-# Platform Services Image Catalogue
 
-These images are published to `bcgov`. bla bla bla.
-
-# Catalogue
-
-Some text here....
-
-## PostgreSQL with Patroni
+## Release Notes and Tags
 
 image stream: bcgov/patroni-postgres
 
