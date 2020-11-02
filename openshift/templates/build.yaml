@@ -35,7 +35,7 @@ parameters:
   - name: GIT_REF
     value: "master"
   - name: PG_VERSION
-    value: "12.4-latest"
+    value: "12.4"
 objects:
   # Postgres ImageStream is created if it doesn't already exist
   - apiVersion: image.openshift.io/v1

@@ -1,8 +1,26 @@
 # TL;DR
 
-This is the platform services image catalogue. bla bla [here](./RELEASE.md).
+This repo contains the Platform Service (PS) and community maintained version of PostgreSQL managed by Patroni for High Availability (HA). You will find this image in the `bcgov` namespace on all PS managed clusters.
+
+```console
+oc get is -n bcgov
+```
+
+You will find a sample of how to deploy the image [here](./samples/README.md).
 
 # Image Management
+
+This image is based on PostgreSQL v12.4. It will be periodically rebuilt acording to the `cron` schedule in the workflow. When it is rebuilt, [patch](https://semver.org/) updates as well as operating security fixes will be incorporated and redistributed to all clusters via the [stable tag](https://docs.microsoft.com/en-us/azure/container-registry/container-registry-image-tag-version).
+
+## Tags
+
+The stable tag for this image is `12.4-latest`. When the image is rebuilt [patch](https://semver.org/) updates to PostgreSQL will be incorporated along with operating system updates.
+
+## Build
+
+This image is built as per the [workflow](.github/workflows/image.yaml) and the OpenShift [templates](./openshift/templates).
+
+## Distribution
 
 Run RBAC to create an SA and bind it to, this is done on `klab`
 
@@ -12,7 +30,8 @@ Run RBAC to create an SA and bind it to, this is done on `klab`
 ```
 
 Create a secret on `silver`:
-```
+
+```console
 oc create secret docker-registry bcgov-tools-klab \
   --docker-server=image-registry.apps.klab.devops.gov.bc.ca \
   --docker-username=bcgov-images-cicd \
@@ -21,6 +40,7 @@ oc create secret docker-registry bcgov-tools-klab \
 ```
 
 Add it to builder secret on `silver`:
+
 ```console
 oc secrets add sa/builder secrets/bcgov-tools-klab --for=pull
 ```
