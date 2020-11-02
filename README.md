@@ -18,6 +18,12 @@ The stable tag for this image is `12.4-latest`. When the image is rebuilt [patch
 
 See the [release notes](./RELEASE.md) for more information and any other unique tags. 
 
+Sample Usage
+
+```yaml
+image-registry.openshift-image-registry.svc:5000/bcgov/patroni-postgres:12.4-latest
+```
+
 ## Build
 
 This image is built as per the [workflow](.github/workflows/image.yaml) and the OpenShift [templates](./openshift/templates).
