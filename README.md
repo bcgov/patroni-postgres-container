@@ -18,11 +18,19 @@ The stable tag for this image is `12.4-latest`. When the image is rebuilt [patch
 
 See the [release notes](./RELEASE.md) for more information and any other unique tags. 
 
-Sample Usage
+# Usage
+
+Below is a sample of how you might reference this image from a `StatefulSet` deployment manifest. 
 
 ```yaml
-image-registry.openshift-image-registry.svc:5000/bcgov/patroni-postgres:12.4-latest
+  image: image-registry.openshift-image-registry.svc:5000/bcgov/patroni-postgres:12.4-latest
 ```
+
+Find a sample StatefulSet deployment [here](./samples/README.md).
+
+**ProTip 🤓**
+
+Use the **internal** host for the `bcgov` image catalog; if you use the external one (contains gov.bc.ca) you'll need to authenticate.
 
 ## Build
 
