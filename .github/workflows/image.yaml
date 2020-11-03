@@ -1,11 +1,11 @@
 name: Build Container
 on: 
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version'     
-        required: true
-        default: 'latest'
+    # inputs:
+    #   version:
+    #     description: 'Version'     
+    #     required: true
+    #     default: 'latest'
   schedule:
     - cron: "* 12 * * 0"  # Monday at 4AM
 defaults:
@@ -24,7 +24,6 @@ jobs:
           cmd: |
             'version'
             'start-build --follow -n bcgov-tools patroni-postgres'
-            'tag -n bcgov-tools bcgov-tools/patroni-postgres:12.4-latest bcgov-tools/patroni-postgres:12.4-${{ github.event.inputs.version }}'
       # - name: Additional Tag
       #   if: github.event_name != 'schedule' && github.ref == 'refs/heads/master'
       #   uses: redhat-developer/openshift-actions@v1.1
