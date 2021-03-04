@@ -23,7 +23,7 @@ jobs:
           parameters: '{"apitoken": "${{ secrets.OpenShiftToken }}", "acceptUntrustedCerts": "true"}'
           cmd: |
             'version'
-            'start-build --follow -n bcgov-tools patroni-postgres'
+            'start-build --follow -n tools patroni-postgres'
       # - name: Additional Tag
       #   if: github.event_name != 'schedule' && github.ref == 'refs/heads/master'
       #   uses: redhat-developer/openshift-actions@v1.1
