@@ -4,10 +4,10 @@ kind: CronJob
 metadata:
   name: build-job
 spec:
-  schedule: "14 4 * * 0" # prod
+  schedule: "14 4 * * 4" # prod
   concurrencyPolicy: Forbid
-  startingDeadlineSeconds: 90 # 1.5 min
-  activeDeadlineSeconds: 600  # 10 min
+  startingDeadlineSeconds: 90
+  activeDeadlineSeconds: 600
   suspend: false
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 1
