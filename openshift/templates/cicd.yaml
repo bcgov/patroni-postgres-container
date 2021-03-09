@@ -16,7 +16,7 @@
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
-  name: github-cicd-credentials
+  name: cicd-credentials
 objects:
   - apiVersion: v1
     kind: ServiceAccount
@@ -110,4 +110,4 @@ parameters:
       credentials.
     name: NAME
     required: true
-    value: github-cicd
+    value: cicd
