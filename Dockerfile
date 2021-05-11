@@ -1,4 +1,4 @@
-FROM postgres:12.4-latest
+FROM docker-remote.artifacts.developer.gov.bc.ca/postgres:12.4
 
 LABEL Alexander Kukushkin <alexander.kukushkin@zalando.de>
 
