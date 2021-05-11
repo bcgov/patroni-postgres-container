@@ -84,9 +84,11 @@ objects:
         type: Git
       strategy:
         dockerStrategy:
+          pullSecret:
+            name: dockerhub-creds 
           from:
-            kind: ImageStreamTag
-            name: postgres:${PG_VERSION}
+            kind: DockerImage
+            name: postgres:12.4
         type: Docker
       triggers:
         - type: ConfigChange
