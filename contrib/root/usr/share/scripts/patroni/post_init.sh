@@ -3,7 +3,7 @@ set -Eeu
 
 if [[ (! -z "$APP_USER") &&  (! -z "$APP_PASSWORD") && (! -z "$APP_DATABASE")]]; then
 
-  if [ "$APP_USER" = "postgres" ]; then
+  if [[ "$APP_USER" = "postgres" ]]; then
     echo "Updating postgres user with new password $APP_PASSWORD"
     psql "$1" -w -c "ALTER ROLE \"postgres\" WITH ENCRYPTED PASSWORD '${APP_PASSWORD}'"
   else
