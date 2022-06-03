@@ -3,9 +3,12 @@ FROM postgres:12.4
 LABEL Alexander Kukushkin <alexander.kukushkin@zalando.de>
 
 ARG patroniv=1.6.5
+ARG postgresv=12.4
 ENV PATRONI_VERSION=$patroniv
+ENV PGVERSION=$postgresv
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
 ENV PATRONI_HOME=/opt/patroni
+ENV PATH=$PATH:/usr/lib/postgresql/$PGVERSION/bin
 
 ARG PGHOME=/home/postgres
 
@@ -33,6 +36,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     #&& apt-get autoremove -y \
     #&& apt-get clean -y \
     #&& rm -rf /var/lib/apt/lists/* /root/.cache
+    
 
 COPY contrib/root /
 
