@@ -29,8 +29,8 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && chmod -R 775 $PGHOME \
     && echo 'Cleaning up' \
     && apt-get remove -y git build-essential python3-dev python3-pip python3-wheel python3-setuptools \
-    && apt-get autoremove -y \
-    && apt-get clean -y \
+    #&& apt-get autoremove -y \
+    #&& apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 COPY contrib/root /
