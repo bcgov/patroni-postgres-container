@@ -77,6 +77,3 @@ oc get is
 ```console
 oc describe is/patroni-postgresql
 ```
-
-
-/usr/local/lib/python3.7/dist-packages/patroni/postgresql

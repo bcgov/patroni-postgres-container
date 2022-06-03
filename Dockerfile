@@ -21,6 +21,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && PGHOME=/home/postgres \
     && mkdir -p $PGHOME \
     && sed -i "s|/var/lib/postgresql.*|$PGHOME:/bin/bash|" /etc/passwd \
+    && echo "PATH=\"$PATH\"" > /etc/environment \
     && echo 'Setting permissions for OpenShift' \
     && chmod 664 /etc/passwd \
     && mkdir -p $PGHOME/pgdata/pgroot \
