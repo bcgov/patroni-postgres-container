@@ -39,6 +39,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
+
 COPY contrib/root /
 
 VOLUME /home/postgres/pgdata
