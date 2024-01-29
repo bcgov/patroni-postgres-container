@@ -6,16 +6,17 @@ import time
 import unittest
 
 import patroni.config as config
+from http.server import HTTPServer
 from mock import Mock, PropertyMock, patch
 from patroni.api import RestApiServer
 from patroni.async_executor import AsyncExecutor
+from patroni.dcs import Cluster, Member
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
 from patroni.exceptions import DCSError
 from patroni.postgresql import Postgresql
 from patroni.postgresql.config import ConfigHandler
 from patroni import check_psycopg
-from patroni.__main__ import Patroni, main as _main, patroni_main
-from six.moves import BaseHTTPServer, builtins
+from patroni.__main__ import Patroni, main as _main
 from threading import Thread
 
 from . import psycopg_connect, SleepException
@@ -44,7 +45,7 @@ class MockFrozenImporter(object):
 @patch.object(ConfigHandler, 'write_recovery_conf', Mock())
 @patch.object(Postgresql, 'is_running', Mock(return_value=MockPostmaster()))
 @patch.object(Postgresql, 'call_nowait', Mock())
-@patch.object(BaseHTTPServer.HTTPServer, '__init__', Mock())
+@patch.object(HTTPServer, '__init__', Mock())
 @patch.object(AsyncExecutor, 'run', Mock())
 @patch.object(etcd.Client, 'write', etcd_write)
 @patch.object(etcd.Client, 'read', etcd_read)
@@ -52,21 +53,22 @@ class TestPatroni(unittest.TestCase):
 
     @patch('sys.argv', ['patroni.py'])
     def test_no_config(self):
-        self.assertRaises(SystemExit, patroni_main)
+        self.assertRaises(SystemExit, _main)
 
     @patch('sys.argv', ['patroni.py', '--validate-config', 'postgres0.yml'])
     @patch('socket.socket.connect_ex', Mock(return_value=1))
     def test_validate_config(self):
-        self.assertRaises(SystemExit, patroni_main)
+        self.assertRaises(SystemExit, _main)
         with patch.object(config.Config, '__init__', Mock(return_value=None)):
-            self.assertRaises(SystemExit, patroni_main)
+            self.assertRaises(SystemExit, _main)
 
     @patch('pkgutil.iter_importers', Mock(return_value=[MockFrozenImporter()]))
     @patch('sys.frozen', Mock(return_value=True), create=True)
-    @patch.object(BaseHTTPServer.HTTPServer, '__init__', Mock())
+    @patch.object(HTTPServer, '__init__', Mock())
     @patch.object(etcd.Client, 'read', etcd_read)
     @patch.object(Thread, 'start', Mock())
-    @patch.object(AbstractEtcdClientWithFailover, 'machines', PropertyMock(return_value=['http://remotehost:2379']))
+    @patch.object(AbstractEtcdClientWithFailover, '_get_machines_list', Mock(return_value=['http://remotehost:2379']))
+    @patch.object(Postgresql, '_get_gucs', Mock(return_value={'foo': True, 'bar': True}))
     def setUp(self):
         self._handlers = logging.getLogger().handlers[:]
         RestApiServer._BaseServer__is_shut_down = Mock()
@@ -88,17 +90,18 @@ class TestPatroni(unittest.TestCase):
     @patch('sys.argv', ['patroni.py', 'postgres0.yml'])
     @patch('time.sleep', Mock(side_effect=SleepException))
     @patch.object(etcd.Client, 'delete', Mock())
-    @patch.object(AbstractEtcdClientWithFailover, 'machines', PropertyMock(return_value=['http://remotehost:2379']))
+    @patch.object(AbstractEtcdClientWithFailover, '_get_machines_list', Mock(return_value=['http://remotehost:2379']))
     @patch.object(Thread, 'join', Mock())
+    @patch.object(Postgresql, '_get_gucs', Mock(return_value={'foo': True, 'bar': True}))
     def test_patroni_patroni_main(self):
         with patch('subprocess.call', Mock(return_value=1)):
             with patch.object(Patroni, 'run', Mock(side_effect=SleepException)):
                 os.environ['PATRONI_POSTGRESQL_DATA_DIR'] = 'data/test0'
-                self.assertRaises(SleepException, patroni_main)
+                self.assertRaises(SleepException, _main)
             with patch.object(Patroni, 'run', Mock(side_effect=KeyboardInterrupt())):
                 with patch('patroni.ha.Ha.is_paused', Mock(return_value=True)):
                     os.environ['PATRONI_POSTGRESQL_DATA_DIR'] = 'data/test0'
-                    patroni_main()
+                    _main()
 
     @patch('os.getpid')
     @patch('multiprocessing.Process')
@@ -143,7 +146,8 @@ class TestPatroni(unittest.TestCase):
         self.p.api.start = Mock()
         self.p.logger.start = Mock()
         self.p.config._dynamic_configuration = {}
-        self.assertRaises(SleepException, self.p.run)
+        with patch('patroni.dcs.Cluster.is_unlocked', Mock(return_value=True)):
+            self.assertRaises(SleepException, self.p.run)
         with patch('patroni.config.Config.reload_local_configuration', Mock(return_value=False)):
             self.p.sighup_handler()
             self.assertRaises(SleepException, self.p.run)
@@ -195,7 +199,40 @@ class TestPatroni(unittest.TestCase):
         self.p.shutdown()
 
     def test_check_psycopg(self):
-        with patch.object(builtins, '__import__', Mock(side_effect=ImportError)):
+        with patch('builtins.__import__', Mock(side_effect=ImportError)):
             self.assertRaises(SystemExit, check_psycopg)
-        with patch.object(builtins, '__import__', mock_import):
+        with patch('builtins.__import__', mock_import):
             self.assertRaises(SystemExit, check_psycopg)
+
+    def test_ensure_unique_name(self):
+        # None/empty cluster implies unique name
+        with patch('patroni.dcs.AbstractDCS.get_cluster', Mock(return_value=None)):
+            self.assertIsNone(self.p.ensure_unique_name())
+        empty_cluster = Cluster.empty()
+        with patch('patroni.dcs.AbstractDCS.get_cluster', Mock(return_value=empty_cluster)):
+            self.assertIsNone(self.p.ensure_unique_name())
+        without_members = empty_cluster._asdict()
+        del without_members['members']
+
+        # Cluster with members with different names implies unique name
+        okay_cluster = Cluster(
+            members=[Member(version=1, name="distinct", session=1, data={})],
+            **without_members
+        )
+        with patch('patroni.dcs.AbstractDCS.get_cluster', Mock(return_value=okay_cluster)):
+            self.assertIsNone(self.p.ensure_unique_name())
+
+        # Cluster with a member with the same name that is running
+        bad_cluster = Cluster(
+            members=[Member(version=1, name="postgresql0", session=1, data={
+                "api_url": "https://127.0.0.1:8008",
+            })],
+            **without_members
+        )
+        with patch('patroni.dcs.AbstractDCS.get_cluster', Mock(return_value=bad_cluster)):
+            # If the api of the running node cannot be reached, this implies unique name
+            with patch.object(self.p, 'request', Mock(side_effect=ConnectionError)):
+                self.assertIsNone(self.p.ensure_unique_name())
+            # Only if the api of the running node is reachable do we throw an error
+            with patch.object(self.p, 'request', Mock()):
+                self.assertRaises(SystemExit, self.p.ensure_unique_name)

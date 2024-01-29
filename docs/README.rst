@@ -4,7 +4,7 @@
 Introduction
 ============
 
-Patroni originated as a fork of `Governor <https://github.com/compose/governor>`__, the project from Compose. It includes plenty of new features.
+Patroni is a template for high availability (HA) PostgreSQL solutions using Python. Patroni originated as a fork of `Governor <https://github.com/compose/governor>`__, the project from Compose. It includes plenty of new features.
 
 For an example of a Docker-based deployment with Patroni, see `Spilo <https://github.com/zalando/spilo>`__, currently in use at Zalando.
 
@@ -91,7 +91,7 @@ kubernetes
 raft
     `pysyncobj` module in order to use python Raft implementation as DCS
 aws
-    `boto` in order to use AWS callbacks
+    `boto3` in order to use AWS callbacks
 
 For example, the command in order to install Patroni together with dependencies for Etcd as a DCS and AWS callbacks is:
 
@@ -109,7 +109,7 @@ Planning the Number of PostgreSQL Nodes
 ---------------------------------------
 
 Patroni/PostgreSQL nodes are decoupled from DCS nodes (except when Patroni implements RAFT on its own) and therefore
-there is no requirement on the minimal number of nodes. Running a cluster consisting of one primary and one standby is 
+there is no requirement on the minimal number of nodes. Running a cluster consisting of one primary and one standby is
 perfectly fine. You can add more standby nodes later.
 
 Running and Configuring
@@ -145,7 +145,7 @@ run:
 YAML Configuration
 ------------------
 
-Go :ref:`here <settings>` for comprehensive information about settings for etcd, consul, and ZooKeeper. And for an example, see `postgres0.yml <https://github.com/zalando/patroni/blob/master/postgres0.yml>`__.
+Go :ref:`here <yaml_configuration>` for comprehensive information about settings for etcd, consul, and ZooKeeper. And for an example, see `postgres0.yml <https://github.com/zalando/patroni/blob/master/postgres0.yml>`__.
 
 
 Environment Configuration
@@ -177,9 +177,9 @@ Testing an HA solution is a time consuming process, with many variables. This is
 That said, here are some pieces of your infrastructure you should be sure to test:
 
 * Network (the network in front of your system as well as the NICs [physical or virtual] themselves)
-* Disk IO 
+* Disk IO
 * file limits (nofile in Linux)
-* RAM. Even if you have oomkiller turned off as suggested, the unavailability of RAM could cause issues.
+* RAM. Even if you have oomkiller turned off, the unavailability of RAM could cause issues.
 * CPU
 * Virtualization Contention (overcommitting the hypervisor)
 * Any cgroup limitation (likely to be related to the above)

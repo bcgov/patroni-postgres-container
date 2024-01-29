@@ -13,6 +13,10 @@ Feature: standby cluster
     When I start postgres0
     Then "members/postgres0" key in DCS has state=running after 10 seconds
     And replication works from postgres1 to postgres0 after 15 seconds
+    When I issue a GET request to http://127.0.0.1:8008/patroni
+    Then I receive a response code 200
+    And I receive a response replication_state streaming
+    And "members/postgres0" key in DCS has replication_state=streaming after 10 seconds
 
   @slot-advance
   Scenario: check permanent logical slots are synced to the replica
@@ -34,8 +38,11 @@ Feature: standby cluster
     Then postgres1 is a leader of batman1 after 10 seconds
     When I add the table foo to postgres0
     Then table foo is present on postgres1 after 20 seconds
+    When I issue a GET request to http://127.0.0.1:8009/patroni
+    Then I receive a response code 200
+    And I receive a response replication_state streaming
     And I sleep for 3 seconds
-    When I issue a GET request to http://127.0.0.1:8009/master
+    When I issue a GET request to http://127.0.0.1:8009/primary
     Then I receive a response code 503
     When I issue a GET request to http://127.0.0.1:8009/standby_leader
     Then I receive a response code 200
@@ -44,13 +51,16 @@ Feature: standby cluster
     When I start postgres2 in a cluster batman1
     Then postgres2 role is the replica after 24 seconds
     And table foo is present on postgres2 after 20 seconds
+    When I issue a GET request to http://127.0.0.1:8010/patroni
+    Then I receive a response code 200
+    And I receive a response replication_state streaming
     And postgres1 does not have a logical replication slot named test_logical
 
   Scenario: check failover
     When I kill postgres1
     And I kill postmaster on postgres1
     Then postgres2 is replicating from postgres0 after 32 seconds
-    When I issue a GET request to http://127.0.0.1:8010/master
+    When I issue a GET request to http://127.0.0.1:8010/primary
     Then I receive a response code 503
     And I sleep for 3 seconds
     When I issue a GET request to http://127.0.0.1:8010/standby_leader

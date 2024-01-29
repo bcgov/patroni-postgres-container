@@ -16,17 +16,15 @@ RUN set -ex \
     && echo 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";' > /etc/apt/apt.conf.d/01norecommend \
     && apt-get update -y \
     # postgres:15 has the patroni package. We don't install it, but we do
-    # install its dependencies
+    # install its dependencies.
     && apt-cache depends patroni | sed -n -e 's/.*Depends: \(python3-.\+\)$/\1/p' \
             | grep -Ev '^python3-(sphinx|etcd|consul|kazoo|kubernetes)' \
             | xargs apt-get install -y vim curl less jq locales haproxy sudo \
                             python3-etcd python3-kazoo python3-pip busybox \
-                            net-tools iputils-ping --fix-missing 
-RUN rm /usr/lib/python3.11/EXTERNALLY-MANAGED \
-    && pip3 install dumb-init 
-
+                            net-tools iputils-ping dumb-init --fix-missing \
+\
     # Cleanup all locales but en_US.UTF-8
-RUN find /usr/share/i18n/charmaps/ -type f ! -name UTF-8.gz -delete \
+    && find /usr/share/i18n/charmaps/ -type f ! -name UTF-8.gz -delete \
     && find /usr/share/i18n/locales/ -type f ! -name en_US ! -name en_GB ! -name i18n* ! -name iso14651_t1 ! -name iso14651_t1_common ! -name 'translit_*' -delete \
     && echo 'en_US.UTF-8 UTF-8' > /usr/share/i18n/SUPPORTED \
 \
@@ -40,24 +38,36 @@ RUN find /usr/share/i18n/charmaps/ -type f ! -name UTF-8.gz -delete \
     && echo 'syntax on\nfiletype plugin indent on\nset mouse-=a\nautocmd FileType yaml setlocal ts=2 sts=2 sw=2 expandtab' > /etc/vim/vimrc.local \
 \
     # Prepare postgres/patroni/haproxy environment
-    && mkdir -p $PGHOME/.config/patroni /patroni /run/haproxy \
-    && ln -s ../../postgres0.yml $PGHOME/.config/patroni/patronictl.yaml \
+    && mkdir -p "$PGHOME/.config/patroni" /patroni /run/haproxy \
+    && ln -s ../../postgres0.yml "$PGHOME/.config/patroni/patronictl.yaml" \
     && ln -s /patronictl.py /usr/local/bin/patronictl \
     && sed -i "s|/var/lib/postgresql.*|$PGHOME:/bin/bash|" /etc/passwd \
-    && chown -R postgres:postgres /var/log
-
+    && chown -R postgres:postgres /var/log \
+\
     # Download etcd
-RUN curl -sL https://github.com/coreos/etcd/releases/download/v${ETCDVERSION}/etcd-v${ETCDVERSION}-linux-amd64.tar.gz \
+    && curl -sL "https://github.com/coreos/etcd/releases/download/v$ETCDVERSION/etcd-v$ETCDVERSION-linux-$(dpkg --print-architecture).tar.gz" \
             | tar xz -C /usr/local/bin --strip=1 --wildcards --no-anchored etcd etcdctl \
 \
-    # Download confd
-    && curl -sL https://github.com/kelseyhightower/confd/releases/download/v${CONFDVERSION}/confd-${CONFDVERSION}-linux-amd64 \
-            > /usr/local/bin/confd && chmod +x /usr/local/bin/confd
-
+    && if [ $(dpkg --print-architecture) = 'arm64' ]; then \
+        # Build confd
+        apt-get install -y git make \
+        && curl -sL https://go.dev/dl/go1.20.4.linux-arm64.tar.gz | tar xz -C /usr/local go \
+        && export GOROOT=/usr/local/go && export PATH=$PATH:$GOROOT/bin \
+        && git clone --recurse-submodules https://github.com/kelseyhightower/confd.git \
+        && make -C confd \
+        && cp confd/bin/confd /usr/local/bin/confd \
+        && rm -rf /confd /usr/local/go; \
+    else \
+        # Download confd
+        curl -sL "https://github.com/kelseyhightower/confd/releases/download/v$CONFDVERSION/confd-$CONFDVERSION-linux-$(dpkg --print-architecture)" \
+            > /usr/local/bin/confd && chmod +x /usr/local/bin/confd; \
+    fi \
+\
     # Clean up all useless packages and some files
-RUN apt-get purge -y --allow-remove-essential python3-pip gzip bzip2 util-linux e2fsprogs \
+    && apt-get purge -y --allow-remove-essential python3-pip gzip bzip2 util-linux e2fsprogs \
                 libmagic1 bsdmainutils login ncurses-bin libmagic-mgc e2fslibs bsdutils \
                 exim4-config gnupg-agent dirmngr \
+                git make \
     && apt-get autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/* \
@@ -87,7 +97,7 @@ RUN apt-get purge -y --allow-remove-essential python3-pip gzip bzip2 util-linux 
     && find /usr/bin -xtype l -delete \
     && find /var/log -type f -exec truncate --size 0 {} \; \
     && find /usr/lib/python3/dist-packages -name '*test*' | xargs rm -fr \
-    && find /lib/x86_64-linux-gnu/security -type f ! -name pam_env.so ! -name pam_permit.so ! -name pam_unix.so -delete
+    && find /lib/$(uname -m)-linux-gnu/security -type f ! -name pam_env.so ! -name pam_permit.so ! -name pam_unix.so -delete
 
 # perform compression if it is necessary
 ARG COMPRESS
@@ -96,8 +106,10 @@ RUN if [ "$COMPRESS" = "true" ]; then \
         # Allow certain sudo commands from postgres
         && echo 'postgres ALL=(ALL) NOPASSWD: /bin/tar xpJf /a.tar.xz -C /, /bin/rm /a.tar.xz, /bin/ln -snf dash /bin/sh' >> /etc/sudoers \
         && ln -snf busybox /bin/sh \
-        && files="/bin/sh /usr/bin/sudo /usr/lib/sudo/sudoers.so /lib/x86_64-linux-gnu/security/pam_*.so" \
-        && libs="$(ldd $files | awk '{print $3;}' | grep '^/' | sort -u) /lib/x86_64-linux-gnu/ld-linux-x86-64.so.* /lib/x86_64-linux-gnu/libnsl.so.* /lib/x86_64-linux-gnu/libnss_compat.so.*" \
+        && arch=$(uname -m) \
+        && darch=$(uname -m | sed 's/_/-/') \
+        && files="/bin/sh /usr/bin/sudo /usr/lib/sudo/sudoers.so /lib/$arch-linux-gnu/security/pam_*.so" \
+        && libs="$(ldd $files | awk '{print $3;}' | grep '^/' | sort -u) /lib/ld-linux-$darch.so.* /lib/$arch-linux-gnu/ld-linux-$darch.so.* /lib/$arch-linux-gnu/libnsl.so.* /lib/$arch-linux-gnu/libnss_compat.so.* /lib/$arch-linux-gnu/libnss_files.so.*" \
         && (echo /var/run $files $libs | tr ' ' '\n' && realpath $files $libs) | sort -u | sed 's/^\///' > /exclude \
         && find /etc/alternatives -xtype l -delete \
         && save_dirs="usr lib var bin sbin etc/ssl etc/init.d etc/alternatives etc/apt" \
@@ -138,17 +150,18 @@ WORKDIR $PGHOME
 
 RUN sed -i 's/env python/&3/' /patroni*.py \
     # "fix" patroni configs
-    && sed -i 's/^\(  connect_address:\|  - host\)/#&/' postgres?.yml \
     && sed -i 's/^  listen: 127.0.0.1/  listen: 0.0.0.0/' postgres?.yml \
     && sed -i "s|^\(  data_dir: \).*|\1$PGDATA|" postgres?.yml \
     && sed -i "s|^#\(  bin_dir: \).*|\1$PGBIN|" postgres?.yml \
     && sed -i 's/^  - encoding: UTF8/  - locale: en_US.UTF-8\n&/' postgres?.yml \
-    && sed -i 's/^\(scope\|name\|etcd\|  host\|  authentication\|  pg_hba\|  parameters\):/#&/' postgres?.yml \
+    && sed -i 's/^\(scope\|name\|etcd\|  host\|  authentication\|  connect_address\|  parameters\):/#&/' postgres?.yml \
     && sed -i 's/^    \(replication\|superuser\|rewind\|unix_socket_directories\|\(\(  \)\{0,1\}\(username\|password\)\)\):/#&/' postgres?.yml \
-    && sed -i 's/^      parameters:/      pg_hba:\n      - local all all trust\n      - host replication all all md5\n      - host all all all md5\n&\n        max_connections: 100/'  postgres?.yml \
+    && sed -i 's/^      parameters:/&\n        max_connections: 100/'  postgres?.yml \
+    && sed -i 's/^      pg_hba:/&\n      - local all all trust/' postgres?.yml \
+    && sed -i 's/^\(.*\) \(.*\) md5/\1 all md5/' postgres?.yml \
     && if [ "$COMPRESS" = "true" ]; then chmod u+s /usr/bin/sudo; fi \
     && chmod +s /bin/ping \
-    && chown -R postgres:postgres $PGHOME /run /etc/haproxy
+    && chown -R postgres:postgres "$PGHOME" /run /etc/haproxy
 
 USER postgres
 

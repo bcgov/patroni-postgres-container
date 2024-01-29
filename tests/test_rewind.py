@@ -3,7 +3,6 @@ from mock import Mock, PropertyMock, patch, mock_open
 from patroni.postgresql import Postgresql
 from patroni.postgresql.cancellable import CancellableSubprocess
 from patroni.postgresql.rewind import Rewind
-from six.moves import builtins
 
 from . import BaseTestPostgresql, MockCursor, psycopg_connect
 
@@ -21,8 +20,8 @@ class MockThread(object):
 def mock_cancellable_call(*args, **kwargs):
     communicate = kwargs.pop('communicate', None)
     if isinstance(communicate, dict):
-        communicate.update(stdout=b'', stderr=b'pg_rewind: error: could not open file ' +
-                                              b'"data/postgresql0/pg_xlog/000000010000000000000003": No such file')
+        communicate.update(stdout=b'', stderr=b'pg_rewind: error: could not open file '
+                           + b'"data/postgresql0/pg_xlog/000000010000000000000003": No such file')
     return 1
 
 
@@ -92,9 +91,10 @@ class TestRewind(BaseTestPostgresql):
                                              'Latest checkpoint location': '0/'})):
             self.r.rewind_or_reinitialize_needed_and_possible(self.leader)
 
-        with patch.object(Postgresql, 'is_running', Mock(return_value=True)):
-            with patch.object(MockCursor, 'fetchone', Mock(side_effect=[(0, 0, 1, 1, 0, 0, 0, 0, 0, None), Exception])):
-                self.r.rewind_or_reinitialize_needed_and_possible(self.leader)
+        with patch.object(Postgresql, 'is_running', Mock(return_value=True)),\
+                patch.object(MockCursor, 'fetchone',
+                             Mock(side_effect=[(0, 0, 1, 1, 0, 0, 0, 0, 0, None, None, None), Exception])):
+            self.r.rewind_or_reinitialize_needed_and_possible(self.leader)
 
     @patch.object(CancellableSubprocess, 'call', mock_cancellable_call)
     @patch.object(Postgresql, 'checkpoint', side_effect=['', '1'],)
@@ -117,7 +117,7 @@ class TestRewind(BaseTestPostgresql):
             self.r.trigger_check_diverged_lsn()
             self.r.execute(self.leader)
 
-        self.leader.member.data.update(version='1.5.7', checkpoint_after_promote=False, role='master')
+        self.leader.member.data.update(version='1.5.7', checkpoint_after_promote=False, role='primary')
         self.assertIsNone(self.r.execute(self.leader))
 
         del self.leader.member.data['checkpoint_after_promote']
@@ -128,9 +128,9 @@ class TestRewind(BaseTestPostgresql):
             self.r.execute(self.leader)
 
     @patch('patroni.postgresql.rewind.logger.info')
-    def test__log_master_history(self, mock_logger):
+    def test__log_primary_history(self, mock_logger):
         history = [[n, n, ''] for n in range(1, 10)]
-        self.r._log_master_history(history, 1)
+        self.r._log_primary_history(history, 1)
         expected = '\n'.join(['{0}\t0/{0}\t'.format(n) for n in range(1, 4)] + ['...', '9\t0/9\t'])
         self.assertEqual(mock_logger.call_args[0][1], expected)
 
@@ -193,7 +193,7 @@ class TestRewind(BaseTestPostgresql):
         m = mock_open(read_data='/usr/lib/postgres/9.6/bin/postgres "-D" "data/postgresql0" \
 "--listen_addresses=127.0.0.1" "--port=5432" "--hot_standby=on" "--wal_level=hot_standby" \
 "--wal_log_hints=on" "--max_wal_senders=5" "--max_replication_slots=5"\n')
-        with patch.object(builtins, 'open', m):
+        with patch('builtins.open', m):
             data = self.r.read_postmaster_opts()
             self.assertEqual(data['wal_level'], 'hot_standby')
             self.assertEqual(int(data['max_replication_slots']), 5)
@@ -223,7 +223,7 @@ class TestRewind(BaseTestPostgresql):
     @patch('patroni.postgresql.rewind.logger.info')
     def test_archive_ready_wals(self, mock_logger_info):
         with patch('os.listdir', Mock(side_effect=OSError)), \
-              patch.object(Postgresql, 'get_guc_value', Mock(side_effect=['on', 'command %f'])):
+             patch.object(Postgresql, 'get_guc_value', Mock(side_effect=['on', 'command %f'])):
             self.r._archive_ready_wals()
             mock_logger_info.assert_not_called()
 
@@ -233,25 +233,29 @@ class TestRewind(BaseTestPostgresql):
             'on', '',
         ]
         with patch.object(Postgresql, 'get_guc_value', Mock(side_effect=get_guc_value_res)):
-            for _ in range(len(get_guc_value_res)//2):
+            for _ in range(len(get_guc_value_res) // 2):
                 self.r._archive_ready_wals()
                 mock_logger_info.assert_not_called()
 
         with patch('os.listdir', Mock(return_value=['000000000000000000000000.ready'])):
             # successful archive_command call
-            with patch.object(CancellableSubprocess, 'call',  Mock(return_value=0)):
+            with patch.object(CancellableSubprocess, 'call', Mock(return_value=0)) as mock_subprocess_call:
                 get_guc_value_res = [
                     'on', 'command %f',
                     'always', 'command %f',
                 ]
                 with patch.object(Postgresql, 'get_guc_value', Mock(side_effect=get_guc_value_res)):
-                    for _ in range(len(get_guc_value_res)//2):
+                    for _ in range(len(get_guc_value_res) // 2):
                         self.r._archive_ready_wals()
                         mock_logger_info.assert_called_once()
                         self.assertEqual(('Trying to archive %s: %s',
                                           '000000000000000000000000', 'command 000000000000000000000000'),
                                          mock_logger_info.call_args[0])
                         mock_logger_info.reset_mock()
+                        mock_subprocess_call.assert_called_once()
+                        self.assertEqual(mock_subprocess_call.call_args.args[0], ['command 000000000000000000000000'])
+                        self.assertEqual(mock_subprocess_call.call_args.kwargs['shell'], True)
+                        mock_subprocess_call.reset_mock()
 
             # failed archive_command call
             with patch.object(CancellableSubprocess, 'call', Mock(return_value=1)):
@@ -274,6 +278,19 @@ class TestRewind(BaseTestPostgresql):
             self.r._archive_ready_wals()
             mock_logger_info.assert_not_called()
 
+    @patch.object(Postgresql, 'major_version', PropertyMock(return_value=100000))
+    @patch('os.listdir', Mock(side_effect=[OSError, ['something', 'something_else']]))
+    @patch('shutil.rmtree', Mock())
+    @patch('patroni.postgresql.rewind.fsync_dir', Mock())
+    @patch('patroni.postgresql.rewind.logger.warning')
+    def test_maybe_clean_pg_replslot(self, mock_logger):
+        # failed to list pg_replslot/
+        self.assertIsNone(self.r._maybe_clean_pg_replslot())
+        mock_logger.assert_called_once()
+        mock_logger.reset_mock()
+
+        self.assertIsNone(self.r._maybe_clean_pg_replslot())
+
     @patch('os.unlink', Mock())
     @patch('os.listdir', Mock(return_value=[]))
     @patch('os.path.isfile', Mock(return_value=True))
@@ -285,14 +302,14 @@ class TestRewind(BaseTestPostgresql):
     @patch('patroni.postgresql.rewind.Thread', MockThread)
     @patch.object(Postgresql, 'controldata')
     @patch.object(Postgresql, 'checkpoint')
-    @patch.object(Postgresql, 'get_master_timeline')
-    def test_ensure_checkpoint_after_promote(self, mock_get_master_timeline, mock_checkpoint, mock_controldata):
+    @patch.object(Postgresql, 'get_primary_timeline')
+    def test_ensure_checkpoint_after_promote(self, mock_get_primary_timeline, mock_checkpoint, mock_controldata):
         mock_controldata.return_value = {"Latest checkpoint's TimeLineID": 1}
-        mock_get_master_timeline.return_value = 1
+        mock_get_primary_timeline.return_value = 1
         self.r.ensure_checkpoint_after_promote(Mock())
 
         self.r.reset_state()
-        mock_get_master_timeline.return_value = 2
+        mock_get_primary_timeline.return_value = 2
         mock_checkpoint.return_value = 0
         self.r.ensure_checkpoint_after_promote(Mock())
         self.r.ensure_checkpoint_after_promote(Mock())
