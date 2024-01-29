@@ -15,9 +15,10 @@ from urllib3.exceptions import HTTPError
 from urllib.parse import urlencode, urlparse, quote
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Union, Tuple, TYPE_CHECKING
 
-from . import AbstractDCS, Cluster, ClusterConfig, Failover, Leader, Member, SyncState,\
-    TimelineHistory, ReturnFalseException, catch_return_false_exception, citus_group_re
+from . import AbstractDCS, Cluster, ClusterConfig, Failover, Leader, Member, Status, SyncState, \
+    TimelineHistory, ReturnFalseException, catch_return_false_exception
 from ..exceptions import DCSError
+from ..postgresql.mpp import AbstractMPP
 from ..utils import deep_compare, parse_bool, Retry, RetryFailedError, split_host_port, uri, USER_AGENT
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Config
@@ -141,6 +142,36 @@ class HTTPClient(object):
 class ConsulClient(base.Consul):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """
+        Consul client with Patroni customisations.
+
+        .. note::
+
+            Parameters, *token*, *cert* and *ca_cert* are not passed to the parent class :class:`consul.base.Consul`.
+
+        Original class documentation,
+
+            *token* is an optional ``ACL token``. If supplied it will be used by
+            default for all requests made with this client session. It's still
+            possible to override this token by passing a token explicitly for a
+            request.
+
+            *consistency* sets the consistency mode to use by default for all reads
+            that support the consistency option. It's still possible to override
+            this by passing explicitly for a given request. *consistency* can be
+            either 'default', 'consistent' or 'stale'.
+
+            *dc* is the datacenter that this agent will communicate with.
+            By default, the datacenter of the host is used.
+
+            *verify* is whether to verify the SSL certificate for HTTPS requests
+
+            *cert* client side certificates for HTTPS requests
+
+        :param args: positional arguments to pass to :class:`consul.base.Consul`
+        :param kwargs: keyword arguments, with *cert*, *ca_cert* and *token* removed, passed to
+                       :class:`consul.base.Consul`
+        """
         self._cert = kwargs.pop('cert', None)
         self._ca_cert = kwargs.pop('ca_cert', None)
         self.token = kwargs.get('token')
@@ -202,8 +233,8 @@ def service_name_from_scope_name(scope_name: str) -> str:
 
 class Consul(AbstractDCS):
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        super(Consul, self).__init__(config)
+    def __init__(self, config: Dict[str, Any], mpp: AbstractMPP) -> None:
+        super(Consul, self).__init__(config, mpp)
         self._base_path = self._base_path[1:]
         self._scope = config['scope']
         self._session = None
@@ -353,23 +384,8 @@ class Consul(AbstractDCS):
         history = history and TimelineHistory.from_node(history['ModifyIndex'], history['Value'])
 
         # get last known leader lsn and slots
-        status = nodes.get(self._STATUS)
-        if status:
-            try:
-                status = json.loads(status['Value'])
-                last_lsn = status.get(self._OPTIME)
-                slots = status.get('slots')
-            except Exception:
-                slots = last_lsn = None
-        else:
-            last_lsn = nodes.get(self._LEADER_OPTIME)
-            last_lsn = last_lsn and last_lsn['Value']
-            slots = None
-
-        try:
-            last_lsn = int(last_lsn or '')
-        except Exception:
-            last_lsn = 0
+        status = nodes.get(self._STATUS) or nodes.get(self._LEADER_OPTIME)
+        status = Status.from_node(status and status['Value'])
 
         # get list of members
         members = [self.member(n) for k, n in nodes.items() if k.startswith(self._MEMBERS) and k.count('/') == 1]
@@ -398,7 +414,7 @@ class Consul(AbstractDCS):
         except Exception:
             failsafe = None
 
-        return Cluster(initialize, config, leader, last_lsn, members, failover, sync, history, slots, failsafe)
+        return Cluster(initialize, config, leader, status, members, failover, sync, history, failsafe)
 
     @property
     def _consistency(self) -> str:
@@ -407,8 +423,8 @@ class Consul(AbstractDCS):
     def _cluster_loader(self, path: str) -> Cluster:
         _, results = self.retry(self._client.kv.get, path, recurse=True, consistency=self._consistency)
         if results is None:
-            raise NotFound
-        nodes = {}
+            return Cluster.empty()
+        nodes: Dict[str, Dict[str, Any]] = {}
         for node in results:
             node['Value'] = (node['Value'] or b'').decode('utf-8')
             nodes[node['Key'][len(path):]] = node
@@ -420,7 +436,7 @@ class Consul(AbstractDCS):
         clusters: Dict[int, Dict[str, Cluster]] = defaultdict(dict)
         for node in results or []:
             key = node['Key'][len(path):].split('/', 1)
-            if len(key) == 2 and citus_group_re.match(key[0]):
+            if len(key) == 2 and self._mpp.group_re.match(key[0]):
                 node['Value'] = (node['Value'] or b'').decode('utf-8')
                 clusters[int(key[0])][key[1]] = node
         return {group: self._cluster_from_nodes(nodes) for group, nodes in clusters.items()}
@@ -430,8 +446,6 @@ class Consul(AbstractDCS):
     ) -> Union[Cluster, Dict[int, Cluster]]:
         try:
             return loader(path)
-        except NotFound:
-            return Cluster.empty()
         except Exception:
             logger.exception('get_cluster')
             raise ConsulError('Consul is not responding properly')
@@ -643,12 +657,8 @@ class Consul(AbstractDCS):
         return self._client.kv.put(self.history_path, value)
 
     @catch_consul_errors
-    def _delete_leader(self) -> bool:
-        cluster = self.cluster
-        if cluster and isinstance(cluster.leader, Leader) and\
-                cluster.leader.name == self._name and isinstance(cluster.leader.version, int):
-            return self._client.kv.delete(self.leader_path, cas=cluster.leader.version)
-        return True
+    def _delete_leader(self, leader: Leader) -> bool:
+        return self._client.kv.delete(self.leader_path, cas=int(leader.version))
 
     @catch_consul_errors
     def set_sync_state_value(self, value: str, version: Optional[int] = None) -> Union[int, bool]:
@@ -657,7 +667,7 @@ class Consul(AbstractDCS):
         if ret:  # We have no other choise, only read after write :(
             if not retry.ensure_deadline(0.5):
                 return False
-            _, ret = self.retry(self._client.kv.get, self.sync_path)
+            _, ret = self.retry(self._client.kv.get, self.sync_path, consistency='consistent')
             if ret and (ret.get('Value') or b'').decode('utf-8') == value:
                 return ret['ModifyIndex']
         return False

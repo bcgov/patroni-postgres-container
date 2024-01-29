@@ -14,24 +14,23 @@ Global/Universal
 
 Log
 ---
+-  **PATRONI\_LOG\_TYPE**: sets the format of logs. Can be either **plain** or **json**. To use **json** format, you must have the :ref:`jsonlogger <extras>` installed. The default value is **plain**.
 -  **PATRONI\_LOG\_LEVEL**: sets the general logging level. Default value is **INFO** (see `the docs for Python logging <https://docs.python.org/3.6/library/logging.html#levels>`_)
 -  **PATRONI\_LOG\_TRACEBACK\_LEVEL**: sets the level where tracebacks will be visible. Default value is **ERROR**. Set it to **DEBUG** if you want to see tracebacks only if you enable **PATRONI\_LOG\_LEVEL=DEBUG**.
--  **PATRONI\_LOG\_FORMAT**: sets the log formatting string. Default value is **%(asctime)s %(levelname)s: %(message)s** (see `the LogRecord attributes <https://docs.python.org/3.6/library/logging.html#logrecord-attributes>`_)
+-  **PATRONI\_LOG\_FORMAT**: sets the log formatting string. If the log type is **plain**, the log format should be a string.
+   Refer to `the LogRecord attributes <https://docs.python.org/3.6/library/logging.html#logrecord-attributes>`_ for
+   available attributes. If the log type is **json**, the log format can be a list in addition to a string. Each list
+   item should correspond to LogRecord attributes. Be cautious that only the field name is required, and the **%(**
+   and **)** should be omitted. If you wish to print a log field with a different key name, use a dictionary where
+   the dictionary key is the log field, and the value is the name of the field you want to be printed in the log.
+   Default value is **%(asctime)s %(levelname)s: %(message)s**
 -  **PATRONI\_LOG\_DATEFORMAT**: sets the datetime formatting string. (see the `formatTime() documentation <https://docs.python.org/3.6/library/logging.html#logging.Formatter.formatTime>`_)
+-  **PATRONI\_LOG\_STATIC\_FIELDS**: add additional fields to the log. This option is only available when the log type is set to **json**. Example ``PATRONI_LOG_STATIC_FIELDS="{app: patroni}"``
 -  **PATRONI\_LOG\_MAX\_QUEUE\_SIZE**: Patroni is using two-step logging. Log records are written into the in-memory queue and there is a separate thread which pulls them from the queue and writes to stderr or file. The maximum size of the internal queue is limited by default by **1000** records, which is enough to keep logs for the past 1h20m.
 -  **PATRONI\_LOG\_DIR**: Directory to write application logs to. The directory must exist and be writable by the user executing Patroni. If you set this env variable, the application will retain 4 25MB logs by default. You can tune those retention values with `PATRONI_LOG_FILE_NUM` and `PATRONI_LOG_FILE_SIZE` (see below).
 -  **PATRONI\_LOG\_FILE\_NUM**: The number of application logs to retain.
 -  **PATRONI\_LOG\_FILE\_SIZE**: Size of patroni.log file (in bytes) that triggers a log rolling.
 -  **PATRONI\_LOG\_LOGGERS**: Redefine logging level per python module. Example ``PATRONI_LOG_LOGGERS="{patroni.postmaster: WARNING, urllib3: DEBUG}"``
-
-Bootstrap configuration
------------------------
-It is possible to create new database users right after the successful initialization of a new cluster. This process is defined by the following variables:
-
--  **PATRONI\_<username>\_PASSWORD='<password>'**
--  **PATRONI\_<username>\_OPTIONS='list,of,options'**
-
-Example: defining ``PATRONI_admin_PASSWORD=strongpasswd`` and ``PATRONI_admin_OPTIONS='createrole,createdb'`` will cause creation of the user **admin** with the password **strongpasswd** that is allowed to create other users and databases.
 
 Citus
 -----
@@ -94,6 +93,7 @@ ZooKeeper
 -  **PATRONI\_ZOOKEEPER\_KEY\_PASSWORD**: (optional) The client key password.
 -  **PATRONI\_ZOOKEEPER\_VERIFY**: (optional) Whether to verify certificate or not. Defaults to ``true``.
 -  **PATRONI\_ZOOKEEPER\_SET\_ACLS**: (optional) If set, configure Kazoo to apply a default ACL to each ZNode that it creates. ACLs will assume 'x509' schema and should be specified as a dictionary with the principal as the key and one or more permissions as a list in the value.  Permissions may be one of ``CREATE``, ``READ``, ``WRITE``, ``DELETE`` or ``ADMIN``.  For example, ``set_acls: {CN=principal1: [CREATE, READ], CN=principal2: [ALL]}``.
+-  **PATRONI\_ZOOKEEPER\_AUTH\_DATA**: (optional) Authentication credentials to use for the connection. Should be a dictionary in the form that `scheme` is the key and `credential` is the value. Defaults to empty dictionary.
 
 .. note::
     It is required to install ``kazoo>=2.6.0`` to support SSL.
@@ -112,7 +112,11 @@ Kubernetes
 -  **PATRONI\_KUBERNETES\_NAMESPACE**: (optional) Kubernetes namespace where the Patroni pod is running. Default value is `default`.
 -  **PATRONI\_KUBERNETES\_LABELS**: Labels in format ``{label1: value1, label2: value2}``. These labels will be used to find existing objects (Pods and either Endpoints or ConfigMaps) associated with the current cluster. Also Patroni will set them on every object (Endpoint or ConfigMap) it creates.
 -  **PATRONI\_KUBERNETES\_SCOPE\_LABEL**: (optional) name of the label containing cluster name. Default value is `cluster-name`.
--  **PATRONI\_KUBERNETES\_ROLE\_LABEL**: (optional) name of the label containing Postgres role (`master` or `replica`). Patroni will set this label on the pod it is running in. Default value is `role`.
+-  **PATRONI\_KUBERNETES\_ROLE\_LABEL**: (optional) name of the label containing role (master or replica or other custom value). Patroni will set this label on the pod it runs in. Default value is ``role``.
+-  **PATRONI\_KUBERNETES\_LEADER\_LABEL\_VALUE**: (optional) value of the pod label when Postgres role is `master`. Default value is `master`.
+-  **PATRONI\_KUBERNETES\_FOLLOWER\_LABEL\_VALUE**: (optional) value of the pod label when Postgres role is `replica`. Default value is `replica`.
+-  **PATRONI\_KUBERNETES\_STANDBY\_LEADER\_LABEL\_VALUE**: (optional) value of the pod label when Postgres role is ``standby_leader``. Default value is ``master``.
+-  **PATRONI\_KUBERNETES\_TMP\_ROLE\_LABEL**: (optional) name of the temporary label containing role (master or replica). Value of this label will always use the default of corresponding role. Set only when necessary.
 -  **PATRONI\_KUBERNETES\_USE\_ENDPOINTS**: (optional) if set to true, Patroni will use Endpoints instead of ConfigMaps to run leader elections and keep cluster state.
 -  **PATRONI\_KUBERNETES\_POD\_IP**: (optional) IP address of the pod Patroni is running in. This value is required when `PATRONI_KUBERNETES_USE_ENDPOINTS` is enabled and is used to populate the leader endpoint subsets when the pod's PostgreSQL is promoted.
 -  **PATRONI\_KUBERNETES\_PORTS**: (optional) if the Service object has the name for the port, the same name must appear in the Endpoint object, otherwise service won't work. For example, if your service is defined as ``{Kind: Service, spec: {ports: [{name: postgresql, port: 5432, targetPort: 5432}]}}``, then you have to set ``PATRONI_KUBERNETES_PORTS='[{"name": "postgresql", "port": 5432}]'`` and Patroni will use it for updating subsets of the leader Endpoint. This parameter is used only if `PATRONI_KUBERNETES_USE_ENDPOINTS` is set.
@@ -196,10 +200,19 @@ REST API
 -  **PATRONI\_RESTAPI\_HTTPS\_EXTRA\_HEADERS**: (optional) HTTPS headers let the REST API server pass additional information with an HTTP response when TLS is enabled. This will also pass additional information set in ``http_extra_headers``.
 -  **PATRONI\_RESTAPI\_REQUEST\_QUEUE\_SIZE**: (optional): Sets request queue size for TCP socket used by Patroni REST API.  Once the queue is full, further requests get a "Connection denied" error. The default value is 5.
 
+.. warning::
+
+    - The ``PATRONI_RESTAPI_CONNECT_ADDRESS`` must be accessible from all nodes of a given Patroni cluster. Internally Patroni is using it during the leader race to find nodes with minimal replication lag.
+    - If you enabled client certificates validation (``PATRONI_RESTAPI_VERIFY_CLIENT`` is set to ``required``), you also **must** provide **valid client certificates** in the ``PATRONI_CTL_CERTFILE``, ``PATRONI_CTL_KEYFILE``, ``PATRONI_CTL_KEYFILE_PASSWORD``. If not provided, Patroni will not work correctly.
+
+
 CTL
 ---
--  **PATRONICTL\_CONFIG\_FILE**: location of the configuration file.
--  **PATRONI\_CTL\_INSECURE**: Allow connections to REST API without verifying SSL certs.
--  **PATRONI\_CTL\_CACERT**: Specifies the file with the CA_BUNDLE file or directory with certificates of trusted CAs to use while verifying REST API SSL certs. If not provided patronictl will use the value provided for REST API "cafile" parameter.
--  **PATRONI\_CTL\_CERTFILE**: Specifies the file with the client certificate in the PEM format. If not provided patronictl will use the value provided for REST API "certfile" parameter.
--  **PATRONI\_CTL\_KEYFILE**: Specifies the file with the client secret key in the PEM format. If not provided patronictl will use the value provided for REST API "keyfile" parameter.
+-  **PATRONICTL\_CONFIG\_FILE**: (optional) location of the configuration file.
+-  **PATRONI\_CTL\_USERNAME**: (optional) Basic-auth username for accessing protected REST API endpoints. If not provided :ref:`patronictl` will use the value provided for REST API "username" parameter.
+-  **PATRONI\_CTL\_PASSWORD**: (optional) Basic-auth password for accessing protected REST API endpoints. If not provided :ref:`patronictl` will use the value provided for REST API "password" parameter.
+-  **PATRONI\_CTL\_INSECURE**: (optional) Allow connections to REST API without verifying SSL certs.
+-  **PATRONI\_CTL\_CACERT**: (optional) Specifies the file with the CA_BUNDLE file or directory with certificates of trusted CAs to use while verifying REST API SSL certs. If not provided :ref:`patronictl` will use the value provided for REST API "cafile" parameter.
+-  **PATRONI\_CTL\_CERTFILE**: (optional) Specifies the file with the client certificate in the PEM format.
+-  **PATRONI\_CTL\_KEYFILE**: (optional) Specifies the file with the client secret key in the PEM format.
+-  **PATRONI\_CTL\_KEYFILE\_PASSWORD**: (optional) Specifies a password for decrypting the client keyfile.

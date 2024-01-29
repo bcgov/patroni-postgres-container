@@ -4,9 +4,12 @@ import unittest
 import urllib3
 
 from mock import Mock, PropertyMock, patch
+from patroni.dcs import get_dcs
 from patroni.dcs.etcd import DnsCachingResolver
-from patroni.dcs.etcd3 import PatroniEtcd3Client, Cluster, Etcd3Client, Etcd3Error, Etcd3ClientError, RetryFailedError,\
-    InvalidAuthToken, Unavailable, Unknown, UnsupportedEtcdVersion, UserEmpty, AuthFailed, base64_encode, Etcd3
+from patroni.dcs.etcd3 import PatroniEtcd3Client, Cluster, Etcd3, Etcd3Client, \
+    Etcd3Error, Etcd3ClientError, ReAuthenticateMode, RetryFailedError, InvalidAuthToken, Unavailable, \
+    Unknown, UnsupportedEtcdVersion, UserEmpty, AuthFailed, AuthOldRevision, base64_encode
+from patroni.postgresql.mpp import get_mpp
 from threading import Thread
 
 from . import SleepException, MockResponse
@@ -79,9 +82,9 @@ class BaseTestEtcd3(unittest.TestCase):
     @patch.object(Thread, 'start', Mock())
     @patch.object(urllib3.PoolManager, 'urlopen', mock_urlopen)
     def setUp(self):
-        self.etcd3 = Etcd3({'namespace': '/patroni/', 'ttl': 30, 'retry_timeout': 10,
-                            'host': 'localhost:2378', 'scope': 'test', 'name': 'foo',
-                            'username': 'etcduser', 'password': 'etcdpassword'})
+        self.etcd3 = get_dcs({'namespace': '/patroni/', 'ttl': 30, 'retry_timeout': 10, 'name': 'foo', 'scope': 'test',
+                              'etcd3': {'host': 'localhost:2378', 'username': 'etcduser', 'password': 'etcdpassword'}})
+        self.assertIsInstance(self.etcd3, Etcd3)
         self.client = self.etcd3._client
         self.kv_cache = self.client._kv_cache
 
@@ -126,9 +129,15 @@ class TestPatroniEtcd3Client(BaseTestEtcd3):
         request = {'key': base64_encode('/patroni/test/leader')}
         mock_urlopen.return_value = MockResponse()
         mock_urlopen.return_value.content = '{"succeeded":true,"header":{"revision":"1"}}'
-        self.client.call_rpc('/kv/txn', {'success': [{'request_delete_range': request}]})
         self.client.call_rpc('/kv/put', request)
         self.client.call_rpc('/kv/deleterange', request)
+
+    @patch.object(urllib3.PoolManager, 'urlopen')
+    def test_txn(self, mock_urlopen):
+        mock_urlopen.return_value = MockResponse()
+        mock_urlopen.return_value.content = '{"header":{"revision":"1"}}'
+        self.client.txn({'target': 'MOD', 'mod_revision': '1'},
+                        {'request_delete_range': {'key': base64_encode('/patroni/test/leader')}})
 
     @patch('time.time', Mock(side_effect=[1, 10.9, 100]))
     def test__wait_cache(self):
@@ -154,9 +163,16 @@ class TestPatroniEtcd3Client(BaseTestEtcd3):
         mock_urlopen.return_value.content = '{"code":16,"error":"etcdserver: invalid auth token"}'
         self.assertRaises(InvalidAuthToken, self.client.deleteprefix, 'foo')
         with patch.object(PatroniEtcd3Client, 'authenticate', Mock(return_value=True)):
-            self.assertRaises(InvalidAuthToken, self.client.deleteprefix, 'foo')
+            retry = self.etcd3._retry.copy()
+            with patch('time.time', Mock(side_effect=[0, 10, 20, 30, 40])):
+                self.assertRaises(InvalidAuthToken, retry, self.client.deleteprefix, 'foo', retry=retry)
             self.client.username = None
-            self.assertRaises(InvalidAuthToken, self.client.deleteprefix, 'foo')
+            self.client._reauthenticate_reason = ReAuthenticateMode.NOT_REQUIRED
+            retry = self.etcd3._retry.copy()
+            self.assertRaises(InvalidAuthToken, retry, self.client.deleteprefix, 'foo', retry=retry)
+            mock_urlopen.return_value.content = '{"code":3,"error":"etcdserver: revision of auth store is old"}'
+            self.client._reauthenticate_reason = ReAuthenticateMode.NOT_REQUIRED
+            self.assertRaises(AuthOldRevision, retry, self.client.deleteprefix, 'foo', retry=retry)
 
     def test__handle_server_response(self):
         response = MockResponse()
@@ -222,7 +238,7 @@ class TestEtcd3(BaseTestEtcd3):
             self.assertRaises(Etcd3Error, self.etcd3.get_cluster)
 
     def test__get_citus_cluster(self):
-        self.etcd3._citus_group = '0'
+        self.etcd3._mpp = get_mpp({'citus': {'group': 0, 'database': 'postgres'}})
         cluster = self.etcd3.get_cluster()
         self.assertIsInstance(cluster, Cluster)
         self.assertIsInstance(cluster.workers[1], Cluster)
@@ -241,7 +257,7 @@ class TestEtcd3(BaseTestEtcd3):
             self.etcd3.update_leader(leader, '123', failsafe={'foo': 'bar'})
         self.etcd3._last_lease_refresh = 0
         self.etcd3.update_leader(leader, '124')
-        with patch.object(PatroniEtcd3Client, 'lease_keepalive', Mock(return_value=True)),\
+        with patch.object(PatroniEtcd3Client, 'lease_keepalive', Mock(return_value=True)), \
                 patch('time.time', Mock(side_effect=[0, 100, 200, 300])):
             self.assertRaises(Etcd3Error, self.etcd3.update_leader, leader, '126')
         self.etcd3._lease = leader.session
@@ -291,9 +307,10 @@ class TestEtcd3(BaseTestEtcd3):
         self.etcd3.cancel_initialization()
 
     def test_delete_leader(self):
-        self.etcd3.delete_leader()
+        leader = self.etcd3.get_cluster().leader
+        self.etcd3.delete_leader(leader)
         self.etcd3._name = 'other'
-        self.etcd3.delete_leader()
+        self.etcd3.delete_leader(leader)
 
     def test_delete_cluster(self):
         self.etcd3.delete_cluster()
@@ -305,7 +322,7 @@ class TestEtcd3(BaseTestEtcd3):
         self.etcd3.set_sync_state_value('', 1)
 
     def test_delete_sync_state(self):
-        self.etcd3.delete_sync_state()
+        self.etcd3.delete_sync_state('1')
 
     def test_watch(self):
         self.etcd3.set_ttl(10)

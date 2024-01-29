@@ -19,10 +19,10 @@ from urllib3.exceptions import HTTPError
 from threading import Condition, Lock, Thread
 from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Type, Union, TYPE_CHECKING
 
-from . import AbstractDCS, Cluster, ClusterConfig, Failover, Leader, Member, SyncState,\
-    TimelineHistory, CITUS_COORDINATOR_GROUP_ID, citus_group_re
+from . import AbstractDCS, Cluster, ClusterConfig, Failover, Leader, Member, Status, SyncState, TimelineHistory
 from ..exceptions import DCSError
-from ..utils import deep_compare, iter_response_objects, keepalive_socket_options,\
+from ..postgresql.mpp import AbstractMPP
+from ..utils import deep_compare, iter_response_objects, keepalive_socket_options, \
     Retry, RetryFailedError, tzutc, uri, USER_AGENT
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Config
@@ -134,6 +134,8 @@ class K8sConfig(object):
             config: Dict[str, Any] = yaml.safe_load(f)
 
         context = context or config['current-context']
+        if TYPE_CHECKING:  # pragma: no cover
+            assert isinstance(context, str)
         context_value = self._get_by_name(config, 'context', context)
         if TYPE_CHECKING:  # pragma: no cover
             assert isinstance(context_value, dict)
@@ -746,16 +748,20 @@ class Kubernetes(AbstractDCS):
 
     _CITUS_LABEL = 'citus-group'
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], mpp: AbstractMPP) -> None:
         self._labels = deepcopy(config['labels'])
         self._labels[config.get('scope_label', 'cluster-name')] = config['scope']
         self._label_selector = ','.join('{0}={1}'.format(k, v) for k, v in self._labels.items())
         self._namespace = config.get('namespace') or 'default'
         self._role_label = config.get('role_label', 'role')
+        self._leader_label_value = config.get('leader_label_value', 'master')
+        self._follower_label_value = config.get('follower_label_value', 'replica')
+        self._standby_leader_label_value = config.get('standby_leader_label_value', 'master')
+        self._tmp_role_label = config.get('tmp_role_label')
         self._ca_certs = os.environ.get('PATRONI_KUBERNETES_CACERT', config.get('cacert')) or SERVICE_CERT_FILENAME
-        super(Kubernetes, self).__init__({**config, 'namespace': ''})
-        if self._citus_group:
-            self._labels[self._CITUS_LABEL] = self._citus_group
+        super(Kubernetes, self).__init__({**config, 'namespace': ''}, mpp)
+        if self._mpp.is_enabled():
+            self._labels[self._CITUS_LABEL] = str(self._mpp.group)
 
         self._retry = Retry(deadline=config['retry_timeout'], max_delay=1, max_tries=-1,
                             retry_exceptions=KubernetesRetriableException)
@@ -765,8 +771,7 @@ class Kubernetes(AbstractDCS):
         except k8s_config.ConfigException:
             k8s_config.load_kube_config(context=config.get('context', 'kind-kind'))
 
-        pod_ip = config.get('pod_ip')
-        self.__ips: List[str] = [] if self._ctl or not isinstance(pod_ip, str) else [pod_ip]
+        self.__ips: List[str] = [] if self._ctl else [config.get('pod_ip', '')]
         self.__ports: List[K8sObject] = []
         ports: List[Dict[str, Any]] = config.get('ports', [{}])
         for p in ports:
@@ -830,7 +835,7 @@ class Kubernetes(AbstractDCS):
         self._api.configure_timeouts(self.loop_wait, self._retry.deadline, self.ttl)
 
         # retriable_http_codes supposed to be either int, list of integers or comma-separated string with integers.
-        retriable_http_codes = config.get('retriable_http_codes', [])
+        retriable_http_codes: Union[str, List[Union[str, int]]] = config.get('retriable_http_codes', [])
         if not isinstance(retriable_http_codes, list):
             retriable_http_codes = [c.strip() for c in str(retriable_http_codes).split(',')]
 
@@ -882,18 +887,8 @@ class Kubernetes(AbstractDCS):
             self._leader_resource_version = metadata.resource_version if metadata else None
         annotations: Dict[str, str] = metadata and metadata.annotations or {}
 
-        # get last known leader lsn
-        try:
-            last_lsn = int(annotations.get(self._OPTIME, ''))
-        except Exception:
-            last_lsn = 0
-
-        # get permanent slots state (confirmed_flush_lsn)
-        slots = annotations.get('slots')
-        try:
-            slots = json.loads(annotations.get('slots', ''))
-        except Exception:
-            slots = None
+        # get last known leader lsn and slots
+        status = Status.from_node(annotations)
 
         # get failsafe topology
         try:
@@ -939,7 +934,7 @@ class Kubernetes(AbstractDCS):
         metadata = sync and sync.metadata
         sync = SyncState.from_node(metadata and metadata.resource_version, metadata and metadata.annotations)
 
-        return Cluster(initialize, config, leader, last_lsn, members, failover, sync, history, slots, failsafe)
+        return Cluster(initialize, config, leader, status, members, failover, sync, history, failsafe)
 
     def _cluster_loader(self, path: Dict[str, Any]) -> Cluster:
         return self._cluster_from_nodes(path['group'], path['nodes'], path['pods'].values())
@@ -949,12 +944,12 @@ class Kubernetes(AbstractDCS):
 
         for name, pod in path['pods'].items():
             group = pod.metadata.labels.get(self._CITUS_LABEL)
-            if group and citus_group_re.match(group):
+            if group and self._mpp.group_re.match(group):
                 clusters[group]['pods'][name] = pod
 
         for name, kind in path['nodes'].items():
             group = kind.metadata.labels.get(self._CITUS_LABEL)
-            if group and citus_group_re.match(group):
+            if group and self._mpp.group_re.match(group):
                 clusters[group]['nodes'][name] = kind
         return {int(group): self._cluster_from_nodes(group, value['nodes'], value['pods'].values())
                 for group, value in clusters.items()}
@@ -981,12 +976,12 @@ class Kubernetes(AbstractDCS):
     def _load_cluster(
             self, path: str, loader: Callable[[Any], Union[Cluster, Dict[int, Cluster]]]
     ) -> Union[Cluster, Dict[int, Cluster]]:
-        group = self._citus_group if path == self.client_path('') else None
+        group = str(self._mpp.group) if self._mpp.is_enabled() and path == self.client_path('') else None
         return self.__load_cluster(group, loader)
 
     def get_citus_coordinator(self) -> Optional[Cluster]:
         try:
-            ret = self.__load_cluster(str(CITUS_COORDINATOR_GROUP_ID), self._cluster_loader)
+            ret = self.__load_cluster(str(self._mpp.coordinator_group_id), self._cluster_loader)
             if TYPE_CHECKING:  # pragma: no cover
                 assert isinstance(ret, Cluster)
             return ret
@@ -1063,6 +1058,27 @@ class Kubernetes(AbstractDCS):
     def _patch_or_create(self, name: str, annotations: Dict[str, Any],
                          resource_version: Optional[str] = None, patch: bool = False,
                          retry: Optional[Callable[..., Any]] = None, ips: Optional[List[str]] = None) -> K8sObject:
+        """Patch or create K8s object, Endpoint or ConfigMap.
+
+        :param name: the name of the object.
+        :param annotations: mapping of annotations that we want to create/update.
+        :param resource_version: object should be updated only if the ``resource_version`` matches provided value.
+        :param patch: ``True`` if we know in advance that the object already exists and we should patch it.
+        :param retry: a callable that will take care of retries
+        :param ips: IP address that we want to put to the subsets of the endpoint. Could have following values:
+
+                    * ``None`` - when we don't need to touch subset;
+                    * ``[]`` - to set subsets to the empty list, when :meth:`delete_leader` method is called;
+
+                    * ``['ip.add.re.ss']`` - when we want to make sure that the subsets of the leader endpoint
+                      contains the IP address of the leader, that we get from the ``kubernetes.pod_ip``;
+
+                    * ``['']`` - when we want to make sure that the subsets of the leader endpoint contains the IP
+                      address of the leader, but ``kubernetes.pod_ip`` configuration is missing. In this case we will
+                      try to take the IP address of the Pod which name matches ``name`` from the config file.
+
+        :returns: the new :class:`V1Endpoints` or :class:`V1ConfigMap` object, that was created or updated.
+        """
         metadata = {'namespace': self._namespace, 'name': name, 'labels': self._labels, 'annotations': annotations}
         if patch or resource_version:
             if resource_version is not None:
@@ -1075,9 +1091,10 @@ class Kubernetes(AbstractDCS):
             metadata['annotations'] = {k: v for k, v in annotations.items() if v is not None}
 
         metadata = k8s_client.V1ObjectMeta(**metadata)
-        if ips is not None and self._api.use_endpoints:
+        if self._api.use_endpoints:
             endpoints = {'metadata': metadata}
-            self._map_subsets(endpoints, ips)
+            if ips is not None:
+                self._map_subsets(endpoints, ips)
             body = k8s_client.V1Endpoints(**endpoints)
         else:
             body = k8s_client.V1ConfigMap(metadata=metadata)
@@ -1133,6 +1150,13 @@ class Kubernetes(AbstractDCS):
     def _update_leader(self, leader: Leader) -> bool:
         """Unused"""
         raise NotImplementedError  # pragma: no cover
+
+    def write_leader_optime(self, last_lsn: int) -> None:
+        """Write value for WAL LSN to ``optime`` annotation of the leader object.
+
+        :param last_lsn: absolute WAL LSN in bytes.
+        """
+        self.patch_or_create(self.leader_path, {self._OPTIME: str(last_lsn)}, patch=True, retry=False)
 
     def _update_leader_with_retry(self, annotations: Dict[str, Any],
                                   resource_version: Optional[str], ips: List[str]) -> bool:
@@ -1219,11 +1243,10 @@ class Kubernetes(AbstractDCS):
             else:
                 annotations['acquireTime'] = self._leader_observed_record.get('acquireTime') or now
             annotations['transitions'] = str(transitions)
-        ips: Optional[List[str]] = [] if self._api.use_endpoints else None
 
         try:
             ret = bool(self._patch_or_create(self.leader_path, annotations,
-                                             self._leader_resource_version, retry=self.retry, ips=ips))
+                                             self._leader_resource_version, retry=self.retry, ips=self.__ips))
         except k8s_client.rest.ApiException as e:
             if e.status == 409 and self._leader_resource_version:  # Conflict in resource_version
                 # Terminate watchers, it could be a sign that K8s API is in a failed state
@@ -1263,19 +1286,27 @@ class Kubernetes(AbstractDCS):
     def touch_member(self, data: Dict[str, Any]) -> bool:
         cluster = self.cluster
         if cluster and cluster.leader and cluster.leader.name == self._name:
-            role = 'master'
+            role = self._standby_leader_label_value if data['role'] == 'standby_leader' else self._leader_label_value
+            tmp_role = 'master'
         elif data['state'] == 'running' and data['role'] not in ('master', 'primary'):
-            role = data['role']
+            role = {'replica': self._follower_label_value}.get(data['role'], data['role'])
+            tmp_role = data['role']
         else:
             role = None
+            tmp_role = None
+
+        role_labels = {self._role_label: role}
+        if self._tmp_role_label:
+            role_labels[self._tmp_role_label] = tmp_role
 
         member = cluster and cluster.get_member(self._name, fallback_to_leader=False)
         pod_labels = member and member.data.pop('pod_labels', None)
         ret = member and pod_labels is not None\
-            and pod_labels.get(self._role_label) == role and deep_compare(data, member.data)
+            and all(pod_labels.get(k) == v for k, v in role_labels.items())\
+            and deep_compare(data, member.data)
 
         if not ret:
-            metadata = {'namespace': self._namespace, 'name': self._name, 'labels': {self._role_label: role},
+            metadata = {'namespace': self._namespace, 'name': self._name, 'labels': role_labels,
                         'annotations': {'status': json.dumps(data, separators=(',', ':'))}}
             body = k8s_client.V1Pod(metadata=k8s_client.V1ObjectMeta(**metadata))
             ret = self._api.patch_namespaced_pod(self._name, self._namespace, body)
@@ -1291,11 +1322,11 @@ class Kubernetes(AbstractDCS):
             if cluster and cluster.config and cluster.config.version else None
         return self.patch_or_create_config({self._INITIALIZE: sysid}, resource_version)
 
-    def _delete_leader(self) -> bool:
+    def _delete_leader(self, leader: Leader) -> bool:
         """Unused"""
         raise NotImplementedError  # pragma: no cover
 
-    def delete_leader(self, last_lsn: Optional[int] = None) -> bool:
+    def delete_leader(self, leader: Optional[Leader], last_lsn: Optional[int] = None) -> bool:
         ret = False
         kind = self._kinds.get(self.leader_path)
         if kind and (kind.metadata.annotations or {}).get(self._LEADER) == self._name:

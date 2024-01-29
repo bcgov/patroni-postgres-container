@@ -1,6 +1,6 @@
 ## This Dockerfile is meant to aid in the building and debugging patroni whilst developing on your local machine
 ## It has all the necessary components to play/debug with a single node appliance, running etcd
-ARG PG_MAJOR=15
+ARG PG_MAJOR=16
 ARG COMPRESS=false
 ARG PGHOME=/home/postgres
 ARG PGDATA=$PGHOME/data
@@ -15,7 +15,7 @@ RUN set -ex \
     && export DEBIAN_FRONTEND=noninteractive \
     && echo 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";' > /etc/apt/apt.conf.d/01norecommend \
     && apt-get update -y \
-    # postgres:15 has the patroni package. We don't install it, but we do
+    # postgres:15 and 16 have a patroni package. We don't install it, but we do
     # install its dependencies.
     && apt-cache depends patroni | sed -n -e 's/.*Depends: \(python3-.\+\)$/\1/p' \
             | grep -Ev '^python3-(sphinx|etcd|consul|kazoo|kubernetes)' \
@@ -90,9 +90,9 @@ RUN set -ex \
         /usr/share/locale/??_?? \
         /usr/share/postgresql/*/man \
         /usr/share/postgresql-common/pg_wrapper \
-        /usr/share/vim/vim80/doc \
-        /usr/share/vim/vim80/lang \
-        /usr/share/vim/vim80/tutor \
+        /usr/share/vim/vim*/doc \
+        /usr/share/vim/vim*/lang \
+        /usr/share/vim/vim*/tutor \
 #        /var/lib/dpkg/info/* \
     && find /usr/bin -xtype l -delete \
     && find /var/log -type f -exec truncate --size 0 {} \; \
@@ -139,6 +139,7 @@ ARG PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin
 
 ENV LC_ALL=$LC_ALL LANG=$LANG EDITOR=/usr/bin/editor
 ENV PGDATA=$PGDATA PATH=$PATH:$PGBIN
+ENV ETCDCTL_API=3
 
 COPY patroni /patroni/
 COPY extras/confd/conf.d/haproxy.toml /etc/confd/conf.d/

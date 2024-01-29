@@ -46,7 +46,7 @@ def install_packages(what):
     packages = packages.get(what, [])
     ver = versions.get(what)
     if float(ver) >= 15:
-        packages += ['postgresql-{0}-citus-11.2'.format(ver)]
+        packages += ['postgresql-{0}-citus-12.1'.format(ver)]
     subprocess.call(['sudo', 'apt-get', 'update', '-y'])
     return subprocess.call(['sudo', 'apt-get', 'install', '-y', 'postgresql-' + ver, 'expect-dev'] + packages)
 
@@ -110,7 +110,7 @@ def install_etcd():
 
 
 def install_postgres():
-    version = os.environ.get('PGVERSION', '15.1-1')
+    version = os.environ.get('PGVERSION', '16.1-1')
     platform = {'darwin': 'osx', 'win32': 'windows-x64', 'cygwin': 'windows-x64'}[sys.platform]
     if platform == 'osx':
         return subprocess.call(['brew', 'install', 'expect', 'postgresql@{0}'.format(version.split('.')[0])])

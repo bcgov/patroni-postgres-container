@@ -15,8 +15,7 @@ from patroni.dcs.etcd import AbstractEtcdClientWithFailover
 from patroni.exceptions import DCSError
 from patroni.postgresql import Postgresql
 from patroni.postgresql.config import ConfigHandler
-from patroni import check_psycopg
-from patroni.__main__ import Patroni, main as _main
+from patroni.__main__ import check_psycopg, Patroni, main as _main
 from threading import Thread
 
 from . import psycopg_connect, SleepException
@@ -25,10 +24,16 @@ from .test_postgresql import MockPostmaster
 
 
 def mock_import(*args, **kwargs):
-    if args[0] == 'psycopg':
+    ret = Mock()
+    ret.__version__ = '2.5.3.dev1 a b c' if args[0] == 'psycopg2' else '3.1.0'
+    return ret
+
+
+def mock_import2(*args, **kwargs):
+    if args[0] == 'psycopg2':
         raise ImportError
     ret = Mock()
-    ret.__version__ = '2.5.3.dev1 a b c'
+    ret.__version__ = '0.1.2'
     return ret
 
 
@@ -40,6 +45,7 @@ class MockFrozenImporter(object):
 @patch('time.sleep', Mock())
 @patch('subprocess.call', Mock(return_value=0))
 @patch('patroni.psycopg.connect', psycopg_connect)
+@patch('urllib3.PoolManager.request', Mock(side_effect=Exception))
 @patch.object(ConfigHandler, 'append_pg_hba', Mock())
 @patch.object(ConfigHandler, 'write_postgresql_conf', Mock())
 @patch.object(ConfigHandler, 'write_recovery_conf', Mock())
@@ -63,6 +69,7 @@ class TestPatroni(unittest.TestCase):
             self.assertRaises(SystemExit, _main)
 
     @patch('pkgutil.iter_importers', Mock(return_value=[MockFrozenImporter()]))
+    @patch('urllib3.PoolManager.request', Mock(side_effect=Exception))
     @patch('sys.frozen', Mock(return_value=True), create=True)
     @patch.object(HTTPServer, '__init__', Mock())
     @patch.object(etcd.Client, 'read', etcd_read)
@@ -106,6 +113,7 @@ class TestPatroni(unittest.TestCase):
     @patch('os.getpid')
     @patch('multiprocessing.Process')
     @patch('patroni.__main__.patroni_main', Mock())
+    @patch('sys.argv', ['patroni.py', 'postgres0.yml'])
     def test_patroni_main(self, mock_process, mock_getpid):
         mock_getpid.return_value = 2
         _main()
@@ -146,6 +154,7 @@ class TestPatroni(unittest.TestCase):
         self.p.api.start = Mock()
         self.p.logger.start = Mock()
         self.p.config._dynamic_configuration = {}
+        self.assertRaises(SleepException, self.p.run)
         with patch('patroni.dcs.Cluster.is_unlocked', Mock(return_value=True)):
             self.assertRaises(SleepException, self.p.run)
         with patch('patroni.config.Config.reload_local_configuration', Mock(return_value=False)):
@@ -166,15 +175,63 @@ class TestPatroni(unittest.TestCase):
         self.p.next_run = time.time() - self.p.dcs.loop_wait - 1
         self.p.schedule_next_run()
 
+    def test__filter_tags(self):
+        tags = {'noloadbalance': False, 'clonefrom': False, 'nosync': False, 'smth': 'random'}
+        self.assertEqual(self.p._filter_tags(tags), {'smth': 'random'})
+
+        tags['clonefrom'] = True
+        tags['smth'] = False
+        self.assertEqual(self.p._filter_tags(tags), {'clonefrom': True, 'smth': False})
+
+        tags = {'nofailover': False, 'failover_priority': 0}
+        self.assertEqual(self.p._filter_tags(tags), tags)
+
+        tags = {'nofailover': True, 'failover_priority': 1}
+        self.assertEqual(self.p._filter_tags(tags), tags)
+
     def test_noloadbalance(self):
         self.p.tags['noloadbalance'] = True
         self.assertTrue(self.p.noloadbalance)
 
     def test_nofailover(self):
-        self.p.tags['nofailover'] = True
-        self.assertTrue(self.p.nofailover)
-        self.p.tags['nofailover'] = None
-        self.assertFalse(self.p.nofailover)
+        for (nofailover, failover_priority, expected) in [
+            # Without any tags, default is False
+            (None, None, False),
+            # Setting `nofailover: True` has precedence
+            (True, 0, True),
+            (True, 1, True),
+            ('False', 1, True),  # because we use bool() for the value
+            # Similarly, setting `nofailover: False` has precedence
+            (False, 0, False),
+            (False, 1, False),
+            ('', 0, False),
+            # Only when we have `nofailover: None` should we got based on priority
+            (None, 0, True),
+            (None, 1, False),
+        ]:
+            with self.subTest(nofailover=nofailover, failover_priority=failover_priority, expected=expected):
+                self.p.tags['nofailover'] = nofailover
+                self.p.tags['failover_priority'] = failover_priority
+                self.assertEqual(self.p.nofailover, expected)
+
+    def test_failover_priority(self):
+        for (nofailover, failover_priority, expected) in [
+            # Without any tags, default is 1
+            (None, None, 1),
+            # Setting `nofailover: True` has precedence (value 0)
+            (True, 0, 0),
+            (True, 1, 0),
+            # Setting `nofailover: False` and `failover_priority: None` gives 1
+            (False, None, 1),
+            # Normal function of failover_priority
+            (None, 0, 0),
+            (None, 1, 1),
+            (None, 2, 2),
+        ]:
+            with self.subTest(nofailover=nofailover, failover_priority=failover_priority, expected=expected):
+                self.p.tags['nofailover'] = nofailover
+                self.p.tags['failover_priority'] = failover_priority
+                self.assertEqual(self.p.failover_priority, expected)
 
     def test_replicatefrom(self):
         self.assertIsNone(self.p.replicatefrom)
@@ -183,7 +240,7 @@ class TestPatroni(unittest.TestCase):
 
     def test_reload_config(self):
         self.p.reload_config()
-        self.p.get_tags = Mock(side_effect=Exception)
+        self.p._get_tags = Mock(side_effect=Exception)
         self.p.reload_config(local=True)
 
     def test_nosync(self):
@@ -202,6 +259,8 @@ class TestPatroni(unittest.TestCase):
         with patch('builtins.__import__', Mock(side_effect=ImportError)):
             self.assertRaises(SystemExit, check_psycopg)
         with patch('builtins.__import__', mock_import):
+            self.assertIsNone(check_psycopg())
+        with patch('builtins.__import__', mock_import2):
             self.assertRaises(SystemExit, check_psycopg)
 
     def test_ensure_unique_name(self):
@@ -231,8 +290,8 @@ class TestPatroni(unittest.TestCase):
         )
         with patch('patroni.dcs.AbstractDCS.get_cluster', Mock(return_value=bad_cluster)):
             # If the api of the running node cannot be reached, this implies unique name
-            with patch.object(self.p, 'request', Mock(side_effect=ConnectionError)):
+            with patch('urllib3.PoolManager.request', Mock(side_effect=ConnectionError)):
                 self.assertIsNone(self.p.ensure_unique_name())
             # Only if the api of the running node is reachable do we throw an error
-            with patch.object(self.p, 'request', Mock()):
+            with patch('urllib3.PoolManager.request', Mock()):
                 self.assertRaises(SystemExit, self.p.ensure_unique_name)

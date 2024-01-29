@@ -5,18 +5,20 @@ import re
 import subprocess
 import time
 
+from copy import deepcopy
 from mock import Mock, MagicMock, PropertyMock, patch, mock_open
 
 import patroni.psycopg as psycopg
 
+from patroni import global_config
 from patroni.async_executor import CriticalTask
 from patroni.collections import CaseInsensitiveSet
-from patroni.config import GlobalConfig
 from patroni.dcs import RemoteMember
 from patroni.exceptions import PostgresConnectionException, PatroniException
 from patroni.postgresql import Postgresql, STATE_REJECT, STATE_NO_RESPONSE
 from patroni.postgresql.bootstrap import Bootstrap
 from patroni.postgresql.callback_executor import CallbackAction
+from patroni.postgresql.config import _false_validator
 from patroni.postgresql.postmaster import PostmasterProcess
 from patroni.postgresql.validator import (ValidatorFactoryNoType, ValidatorFactoryInvalidType,
                                           ValidatorFactoryInvalidSpec, ValidatorFactory, InvalidGucValidatorsFile,
@@ -25,7 +27,8 @@ from patroni.postgresql.validator import (ValidatorFactoryNoType, ValidatorFacto
 from patroni.utils import RetryFailedError
 from threading import Thread, current_thread
 
-from . import BaseTestPostgresql, MockCursor, MockPostmaster, psycopg_connect, mock_available_gucs
+from . import (BaseTestPostgresql, MockCursor, MockPostmaster, psycopg_connect, mock_available_gucs,
+               GET_PG_SETTINGS_RESULT)
 
 
 mtime_ret = {}
@@ -237,7 +240,10 @@ class TestPostgresql(BaseTestPostgresql):
     @patch.object(Postgresql, 'latest_checkpoint_location', Mock(return_value='7'))
     def test__do_stop(self):
         mock_callback = Mock()
-        with patch.object(Postgresql, 'controldata', Mock(return_value={'Database cluster state': 'shut down'})):
+        with patch.object(Postgresql, 'controldata',
+                          Mock(return_value={'Database cluster state': 'shut down',
+                                             "Latest checkpoint's TimeLineID": '1',
+                                             'Latest checkpoint location': '1/1'})):
             self.assertTrue(self.p.stop(on_shutdown=mock_callback, stop_timeout=3))
             mock_callback.assert_called()
         with patch.object(Postgresql, 'controldata',
@@ -310,6 +316,17 @@ class TestPostgresql(BaseTestPostgresql):
         self.p.config.write_postgresql_conf()
         self.assertEqual(self.p.config.check_recovery_conf(None), (False, False))
         self.assertEqual(self.p.config.check_recovery_conf(None), (False, False))
+
+        # Config files changed, but can't connect to postgres
+        mock_get_pg_settings.side_effect = PostgresConnectionException('')
+        with patch('patroni.postgresql.config.mtime', mock_mtime):
+            self.assertEqual(self.p.config.check_recovery_conf(None), (True, True))
+
+        # Config files didn't change, but postgres crashed or in crash recovery
+        with patch.object(MockPostmaster, 'create_time', Mock(return_value=1234568), create=True):
+            self.assertEqual(self.p.config.check_recovery_conf(None), (False, False))
+
+        # Any other exception raised when executing the query
         mock_get_pg_settings.side_effect = Exception
         with patch('patroni.postgresql.config.mtime', mock_mtime):
             self.assertEqual(self.p.config.check_recovery_conf(None), (True, True))
@@ -333,7 +350,7 @@ class TestPostgresql(BaseTestPostgresql):
 
         mock_read_auto = mock_open(read_data=read_data)
         mock_read_auto.return_value.__iter__ = lambda o: iter(o.readline, '')
-        with patch('builtins.open', Mock(side_effect=[mock_open()(), mock_read_auto(), IOError])),\
+        with patch('builtins.open', Mock(side_effect=[mock_open()(), mock_read_auto(), IOError])), \
                 patch('os.chmod', Mock()):
             self.p.config.write_postgresql_conf()
 
@@ -346,8 +363,7 @@ class TestPostgresql(BaseTestPostgresql):
     @patch.object(Postgresql, 'start', Mock())
     def test_follow(self):
         self.p.call_nowait(CallbackAction.ON_START)
-        m = RemoteMember.from_name_and_data('1', {'restore_command': '2', 'primary_slot_name': 'foo',
-                                                  'conn_kwargs': {'host': 'bar'}})
+        m = RemoteMember('1', {'restore_command': '2', 'primary_slot_name': 'foo', 'conn_kwargs': {'host': 'bar'}})
         self.p.follow(m)
         with patch.object(Postgresql, 'ensure_major_version_is_known', Mock(return_value=False)):
             self.assertIsNone(self.p.follow(m))
@@ -364,11 +380,11 @@ class TestPostgresql(BaseTestPostgresql):
         self.assertRaises(psycopg.ProgrammingError, self.p.query, 'blabla')
 
     @patch.object(Postgresql, 'pg_isready', Mock(return_value=STATE_REJECT))
-    def test_is_leader(self):
-        self.assertTrue(self.p.is_leader())
+    def test_is_primary(self):
+        self.assertTrue(self.p.is_primary())
         self.p.reset_cluster_info_state(None)
         with patch.object(Postgresql, '_query', Mock(side_effect=RetryFailedError(''))):
-            self.assertFalse(self.p.is_leader())
+            self.assertFalse(self.p.is_primary())
 
     @patch.object(Postgresql, 'controldata', Mock(return_value={'Database cluster state': 'shut down',
                                                                 'Latest checkpoint location': '0/1ADBC18',
@@ -462,7 +478,7 @@ class TestPostgresql(BaseTestPostgresql):
         self.assertIsNone(self.p.call_nowait(CallbackAction.ON_START))
 
     @patch.object(Postgresql, 'is_running', Mock(return_value=MockPostmaster()))
-    def test_is_leader_exception(self):
+    def test_is_primary_exception(self):
         self.p.start()
         self.p.query = Mock(side_effect=psycopg.OperationalError("not supported"))
         self.assertTrue(self.p.stop())
@@ -496,8 +512,8 @@ class TestPostgresql(BaseTestPostgresql):
             self.p.remove_data_directory()
         with patch('os.path.isfile', Mock(return_value=True)):
             self.p.remove_data_directory()
-        with patch('os.path.islink', Mock(side_effect=[False, False, True, True])),\
-                patch('os.listdir', Mock(return_value=['12345'])),\
+        with patch('os.path.islink', Mock(side_effect=[False, False, True, True])), \
+                patch('os.listdir', Mock(return_value=['12345'])), \
                 patch('os.path.realpath', Mock(side_effect=['../foo', '../foo_tsp'])):
             self.p.remove_data_directory()
 
@@ -523,8 +539,9 @@ class TestPostgresql(BaseTestPostgresql):
     def test_save_configuration_files(self):
         self.p.config.save_configuration_files()
 
-    @patch('os.path.isfile', Mock(side_effect=[False, True]))
-    @patch('shutil.copy', Mock(side_effect=IOError))
+    @patch('os.path.isfile', Mock(side_effect=[False, True, False, True]))
+    @patch('shutil.copy', Mock(side_effect=[None, IOError]))
+    @patch('os.chmod', Mock())
     def test_restore_configuration_files(self):
         self.p.config.restore_configuration_files()
 
@@ -545,28 +562,111 @@ class TestPostgresql(BaseTestPostgresql):
 
     @patch('time.sleep', Mock())
     @patch.object(Postgresql, 'is_running', Mock(return_value=True))
-    @patch.object(MockCursor, 'fetchone')
-    def test_reload_config(self, mock_fetchone):
-        mock_fetchone.return_value = (1,)
-        parameters = self._PARAMETERS.copy()
-        parameters.pop('f.oo')
-        parameters['wal_buffers'] = '512'
-        config = {'pg_hba': [''], 'pg_ident': [''], 'use_unix_socket': True, 'use_unix_socket_repl': True,
-                  'authentication': {},
-                  'retry_timeout': 10, 'listen': '*', 'krbsrvname': 'postgres', 'parameters': parameters}
+    @patch('patroni.postgresql.config.logger.info')
+    @patch('patroni.postgresql.config.logger.warning')
+    def test_reload_config(self, mock_warning, mock_info):
+        config = deepcopy(self.p.config._config)
+
+        # Nothing changed
         self.p.reload_config(config)
-        mock_fetchone.side_effect = Exception
-        parameters['b.ar'] = 'bar'
+        mock_info.assert_called_once_with('No PostgreSQL configuration items changed, nothing to reload.')
+        mock_warning.assert_not_called()
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+
+        # Ignored params changed
+        config['parameters']['archive_cleanup_command'] = 'blabla'
         self.p.reload_config(config)
-        parameters['autovacuum'] = 'on'
+        mock_info.assert_called_once_with('No PostgreSQL configuration items changed, nothing to reload.')
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+
+        # Handle wal_buffers
+        self.p.config._config['parameters']['wal_buffers'] = '512'
         self.p.reload_config(config)
-        parameters['autovacuum'] = 'off'
-        parameters.pop('search_path')
-        config['listen'] = '*:5433'
+        mock_info.assert_called_once_with('No PostgreSQL configuration items changed, nothing to reload.')
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+        config = deepcopy(self.p.config._config)
+
+        # hba/ident_changed
+        config['pg_hba'] = ['']
+        config['pg_ident'] = ['']
         self.p.reload_config(config)
-        parameters['unix_socket_directories'] = '.'
+        mock_info.assert_called_once_with('Reloading PostgreSQL configuration.')
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+
+        # Postmaster parameter change (pending_restart)
+        init_max_worker_processes = config['parameters']['max_worker_processes']
+        config['parameters']['max_worker_processes'] *= 2
+        with patch('patroni.postgresql.Postgresql._query', Mock(side_effect=[GET_PG_SETTINGS_RESULT, [(1,)]])):
+            self.p.reload_config(config)
+            self.assertEqual(mock_info.call_args_list[0][0], ('Changed %s from %s to %s (restart might be required)',
+                                                              'max_worker_processes', str(init_max_worker_processes),
+                                                              config['parameters']['max_worker_processes']))
+            self.assertEqual(mock_info.call_args_list[1][0], ('Reloading PostgreSQL configuration.',))
+            self.assertEqual(self.p.pending_restart, True)
+
+        mock_info.reset_mock()
+
+        # Reset to the initial value without restart
+        config['parameters']['max_worker_processes'] = init_max_worker_processes
         self.p.reload_config(config)
-        self.p.config.resolve_connection_addresses()
+        self.assertEqual(mock_info.call_args_list[0][0], ('Changed %s from %s to %s', 'max_worker_processes',
+                                                          init_max_worker_processes * 2,
+                                                          str(config['parameters']['max_worker_processes'])))
+        self.assertEqual(mock_info.call_args_list[1][0], ('Reloading PostgreSQL configuration.',))
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+
+        # User-defined parameter changed (removed)
+        config['parameters'].pop('f.oo')
+        self.p.reload_config(config)
+        self.assertEqual(mock_info.call_args_list[0][0], ('Changed %s from %s to %s', 'f.oo', 'bar', None))
+        self.assertEqual(mock_info.call_args_list[1][0], ('Reloading PostgreSQL configuration.',))
+        self.assertEqual(self.p.pending_restart, False)
+
+        mock_info.reset_mock()
+
+        # Non-postmaster parameter change
+        config['parameters']['autovacuum'] = 'off'
+        self.p.reload_config(config)
+        self.assertEqual(mock_info.call_args_list[0][0], ("Changed %s from %s to %s", 'autovacuum', 'on', 'off'))
+        self.assertEqual(mock_info.call_args_list[1][0], ('Reloading PostgreSQL configuration.',))
+        self.assertEqual(self.p.pending_restart, False)
+
+        config['parameters']['autovacuum'] = 'on'
+        mock_info.reset_mock()
+
+        # Remove invalid parameter
+        config['parameters']['invalid'] = 'value'
+        self.p.reload_config(config)
+        self.assertEqual(mock_warning.call_args_list[0][0],
+                         ('Removing invalid parameter `%s` from postgresql.parameters', 'invalid'))
+        config['parameters'].pop('invalid')
+
+        mock_warning.reset_mock()
+        mock_info.reset_mock()
+
+        # Non-empty result (outside changes) and exception while querying pending_restart parameters
+        with patch('patroni.postgresql.Postgresql._query',
+                   Mock(side_effect=[GET_PG_SETTINGS_RESULT, [(1,)], GET_PG_SETTINGS_RESULT, Exception])):
+            self.p.reload_config(config, True)
+            self.assertEqual(mock_info.call_args_list[0][0], ('Reloading PostgreSQL configuration.',))
+            self.assertEqual(self.p.pending_restart, True)
+
+            # Invalid values, just to increase silly coverage in postgresql.validator.
+            # One day we will have proper tests there.
+            config['parameters']['autovacuum'] = 'of'  # Bool.transform()
+            config['parameters']['vacuum_cost_limit'] = 'smth'  # Number.transform()
+            self.p.reload_config(config, True)
+            self.assertEqual(mock_warning.call_args_list[-1][0][0], 'Exception %r when running query')
 
     def test_resolve_connection_addresses(self):
         self.p.config._config['use_unix_socket'] = self.p.config._config['use_unix_socket_repl'] = True
@@ -574,7 +674,10 @@ class TestPostgresql(BaseTestPostgresql):
         self.assertEqual(self.p.config.local_replication_address, {'host': '/tmp', 'port': '5432'})
         self.p.config._server_parameters.pop('unix_socket_directories')
         self.p.config.resolve_connection_addresses()
-        self.assertEqual(self.p.config._local_address, {'port': '5432'})
+        self.assertEqual(self.p.connection_pool.conn_kwargs, {'connect_timeout': 3, 'dbname': 'postgres',
+                                                              'fallback_application_name': 'Patroni',
+                                                              'options': '-c statement_timeout=2000',
+                                                              'password': 'test', 'port': '5432', 'user': 'foo'})
 
     @patch.object(Postgresql, '_version_file_exists', Mock(return_value=True))
     def test_get_major_version(self):
@@ -585,7 +688,7 @@ class TestPostgresql(BaseTestPostgresql):
 
     def test_postmaster_start_time(self):
         now = datetime.datetime.now()
-        with patch.object(MockCursor, "fetchone", Mock(return_value=(now, True, '', '', '', '', False))):
+        with patch.object(MockCursor, "fetchall", Mock(return_value=[(now, True, '', '', '', '', False)])):
             self.assertEqual(self.p.postmaster_start_time(), now.isoformat(sep=' '))
             t = Thread(target=self.p.postmaster_start_time)
             t.start()
@@ -671,13 +774,13 @@ class TestPostgresql(BaseTestPostgresql):
             self.assertIsNone(self.p.wait_for_startup())
 
     def test_get_server_parameters(self):
-        config = {'parameters': {'wal_level': 'hot_standby'}, 'listen': '0'}
-        self.p._global_config = GlobalConfig({'synchronous_mode': True})
-        self.p.config.get_server_parameters(config)
-        self.p._global_config = GlobalConfig({'synchronous_mode': True, 'synchronous_mode_strict': True})
-        self.p.config.get_server_parameters(config)
-        self.p.config.set_synchronous_standby_names('foo')
-        self.assertTrue(str(self.p.config.get_server_parameters(config)).startswith('<CaseInsensitiveDict'))
+        config = {'parameters': {'wal_level': 'hot_standby', 'max_prepared_transactions': 100}, 'listen': '0'}
+        with patch.object(global_config.__class__, 'is_synchronous_mode', PropertyMock(return_value=True)):
+            self.p.config.get_server_parameters(config)
+            with patch.object(global_config.__class__, 'is_synchronous_mode_strict', PropertyMock(return_value=True)):
+                self.p.config.get_server_parameters(config)
+                self.p.config.set_synchronous_standby_names('foo')
+                self.assertTrue(str(self.p.config.get_server_parameters(config)).startswith('<CaseInsensitiveDict'))
 
     @patch('time.sleep', Mock())
     def test__wait_for_connection_close(self):
@@ -704,22 +807,30 @@ class TestPostgresql(BaseTestPostgresql):
         self.assertEqual(self.p.get_primary_timeline(), 1)
 
     @patch.object(Postgresql, 'get_postgres_role_from_data_directory', Mock(return_value='replica'))
+    @patch.object(Postgresql, 'is_running', Mock(return_value=False))
     @patch.object(Bootstrap, 'running_custom_bootstrap', PropertyMock(return_value=True))
-    @patch.object(Postgresql, 'controldata', Mock(return_value={'max_connections setting': '200',
-                                                                'max_worker_processes setting': '20',
-                                                                'max_locks_per_xact setting': '100',
-                                                                'max_wal_senders setting': 10}))
-    @patch('patroni.postgresql.config.logger.warning')
+    @patch('patroni.postgresql.config.logger')
     def test_effective_configuration(self, mock_logger):
-        self.p.cancellable.cancel()
-        self.p.config.write_recovery_conf({'pause_at_recovery_target': 'false'})
-        self.assertFalse(self.p.start())
-        mock_logger.assert_called_once()
-        self.assertTrue('is missing from pg_controldata output' in mock_logger.call_args[0][0])
+        controldata = {'max_connections setting': '100', 'max_worker_processes setting': '8',
+                       'max_locks_per_xact setting': '64', 'max_wal_senders setting': 5}
 
-        self.assertTrue(self.p.pending_restart)
-        with patch.object(Bootstrap, 'keep_existing_recovery_conf', PropertyMock(return_value=True)):
+        with patch.object(Postgresql, 'controldata', Mock(return_value=controldata)), \
+             patch.object(Bootstrap, 'keep_existing_recovery_conf', PropertyMock(return_value=True)):
+            self.p.cancellable.cancel()
             self.assertFalse(self.p.start())
+            self.assertFalse(self.p.pending_restart)
+            mock_logger.warning.assert_called_once()
+            self.assertEqual(mock_logger.warning.call_args[0],
+                             ('%s is missing from pg_controldata output', 'max_prepared_xacts setting'))
+
+        mock_logger.reset_mock()
+        controldata['max_prepared_xacts setting'] = 0
+        controldata['max_wal_senders setting'] *= 2
+
+        with patch.object(Postgresql, 'controldata', Mock(return_value=controldata)):
+            self.p.config.write_recovery_conf({'pause_at_recovery_target': 'false'})
+            self.assertFalse(self.p.start())
+            mock_logger.warning.assert_not_called()
             self.assertTrue(self.p.pending_restart)
 
     @patch('os.path.exists', Mock(return_value=True))
@@ -947,6 +1058,7 @@ class TestPostgresql2(BaseTestPostgresql):
     @patch('patroni.postgresql.CallbackExecutor', Mock())
     @patch.object(Postgresql, 'get_major_version', Mock(return_value=140000))
     @patch.object(Postgresql, 'is_running', Mock(return_value=True))
+    @patch.object(Postgresql, 'is_primary', Mock(return_value=False))
     def setUp(self):
         super(TestPostgresql2, self).setUp()
 
@@ -955,3 +1067,21 @@ class TestPostgresql2(BaseTestPostgresql):
         gucs = self.p.available_gucs
         self.assertIsInstance(gucs, CaseInsensitiveSet)
         self.assertEqual(gucs, mock_available_gucs.return_value)
+
+    def test_cluster_info_query(self):
+        self.assertIn('diff(pg_catalog.pg_current_wal_flush_lsn(', self.p.cluster_info_query)
+        self.p._major_version = 90600
+        self.assertIn('diff(pg_catalog.pg_current_xlog_flush_location(', self.p.cluster_info_query)
+        self.p._major_version = 90500
+        self.assertIn('diff(pg_catalog.pg_current_xlog_location(', self.p.cluster_info_query)
+
+    @patch.object(Postgresql, 'is_primary', Mock(return_value=False))
+    @patch.object(Postgresql, '_query', Mock(return_value=[('primary_conninfo', 'host=a port=5433 passfile=/blabla')]))
+    def test_load_current_server_parameters(self):
+        keep_values = {name: self.p.config._server_parameters[name]
+                       for name, value in self.p.config.CMDLINE_OPTIONS.items() if value[1] == _false_validator}
+        self.p.config.load_current_server_parameters()
+        self.assertTrue(all(self.p.config._server_parameters[name] == value for name, value in keep_values.items()))
+        self.assertEqual(dict(self.p.config._recovery_params),
+                         {'primary_conninfo': {'host': 'a', 'port': '5433', 'passfile': '/blabla',
+                          'gssencmode': 'prefer', 'sslmode': 'prefer', 'channel_binding': 'prefer'}})

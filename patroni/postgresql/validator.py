@@ -178,10 +178,11 @@ class ValidatorFactory:
 
         :returns: the Patroni validator object that corresponds to the specification found in *validator*.
 
-        :raises :class:`ValidatorFactoryNoType`: if *validator* contains no ``type`` key.
-        :raises :class:`ValidatorFactoryInvalidType`: if ``type`` key from *validator* contains an invalid value.
-        :raises :class:`ValidatorFactoryInvalidSpec`: if *validator* contains an invalid set of attributes for the
-            given ``type``.
+        :raises:
+            :class:`ValidatorFactoryNoType`: if *validator* contains no ``type`` key.
+            :class:`ValidatorFactoryInvalidType`: if ``type`` key from *validator* contains an invalid value.
+            :class:`ValidatorFactoryInvalidSpec`: if *validator* contains an invalid set of attributes for the given
+                ``type``.
 
         :Example:
 
@@ -265,7 +266,8 @@ def _read_postgres_gucs_validators_file(file: str) -> Dict[str, Any]:
     :returns: the YAML content parsed into a Python object. If any issue is faced while reading/parsing the file, then
         return ``None``.
 
-    :raises :class:`InvalidGucValidatorsFile`: if faces an issue while reading or parsing *file*.
+    :raises:
+        :class:`InvalidGucValidatorsFile`: if faces an issue while reading or parsing *file*.
     """
     try:
         with open(file, encoding='UTF-8') as stream:
@@ -288,7 +290,7 @@ def _load_postgres_gucs_validators() -> None:
     Any problem faced while reading or parsing files will be logged as a ``WARNING`` by the child function, and the
     corresponding file or validator will be ignored.
 
-    By default Patroni only ships the file ``0_postgres.yml``, which contains Community Postgres GUCs validators, but
+    By default, Patroni only ships the file ``0_postgres.yml``, which contains Community Postgres GUCs validators, but
     that behavior can be extended. For example: if a vendor wants to add GUC validators to Patroni for covering a custom
     Postgres build, then they can create their custom YAML files under ``available_parameters`` directory.
 
@@ -298,8 +300,10 @@ def _load_postgres_gucs_validators() -> None:
             writes them to ``postgresql.conf`` if running PG 12 and above).
 
     Then, each of these sections, if specified, may contain one or more attributes with the following structure:
+
         * key: the name of a GUC;
         * value: a list of validators. Each item in the list must contain a ``type`` attribute, which must be one among:
+
             * ``Bool``; or
             * ``Integer``; or
             * ``Real``; or
@@ -311,6 +315,7 @@ def _load_postgres_gucs_validators() -> None:
             class in this module.
 
     .. seealso::
+
         * :class:`Bool`;
         * :class:`Integer`;
         * :class:`Real`;
@@ -323,61 +328,62 @@ def _load_postgres_gucs_validators() -> None:
         This is a sample content for an YAML file based on Postgres GUCs, showing each of the supported types and
         sections:
 
-        ```yaml
-        parameters:
-          archive_command:
-          - type: String
-            version_from: 90300
-            version_till: null
-          archive_mode:
-          - type: Bool
-            version_from: 90300
-            version_till: 90500
-          - type: EnumBool
-            version_from: 90500
-            version_till: null
-            possible_values:
-            - always
-          archive_timeout:
-          - type: Integer
-            version_from: 90300
-            version_till: null
-            min_val: 0
-            max_val: 1073741823
-            unit: s
-          autovacuum_vacuum_cost_delay:
-          - type: Integer
-            version_from: 90300
-            version_till: 120000
-            min_val: -1
-            max_val: 100
-            unit: ms
-          - type: Real
-            version_from: 120000
-            version_till: null
-            min_val: -1
-            max_val: 100
-            unit: ms
-          client_min_messages:
-          - type: Enum
-            version_from: 90300
-            version_till: null
-            possible_values:
-            - debug5
-            - debug4
-            - debug3
-            - debug2
-            - debug1
-            - log
-            - notice
-            - warning
-            - error
-        recovery_parameters:
-          archive_cleanup_command:
-          - type: String
-            version_from: 90300
-            version_till: null
-        ```
+            .. code-block:: yaml
+
+                parameters:
+                  archive_command:
+                  - type: String
+                    version_from: 90300
+                    version_till: null
+                  archive_mode:
+                  - type: Bool
+                    version_from: 90300
+                    version_till: 90500
+                  - type: EnumBool
+                    version_from: 90500
+                    version_till: null
+                    possible_values:
+                    - always
+                  archive_timeout:
+                  - type: Integer
+                    version_from: 90300
+                    version_till: null
+                    min_val: 0
+                    max_val: 1073741823
+                    unit: s
+                  autovacuum_vacuum_cost_delay:
+                  - type: Integer
+                    version_from: 90300
+                    version_till: 120000
+                    min_val: -1
+                    max_val: 100
+                    unit: ms
+                  - type: Real
+                    version_from: 120000
+                    version_till: null
+                    min_val: -1
+                    max_val: 100
+                    unit: ms
+                  client_min_messages:
+                  - type: Enum
+                    version_from: 90300
+                    version_till: null
+                    possible_values:
+                    - debug5
+                    - debug4
+                    - debug3
+                    - debug2
+                    - debug1
+                    - log
+                    - notice
+                    - warning
+                    - error
+                recovery_parameters:
+                  archive_cleanup_command:
+                  - type: String
+                    version_from: 90300
+                    version_till: null
+
     """
     conf_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -432,13 +438,15 @@ def _transform_parameter_value(validators: MutableMapping[str, Tuple[_Transforma
     :param value: value of the Postgres GUC.
     :param available_gucs: a set of all GUCs available in Postgres *version*. Each item is the name of a Postgres
         GUC. Used for a couple purposes:
+
         * Disallow writing GUCs to ``postgresql.conf`` (or ``recovery.conf``) that does not exist in Postgres *version*;
         * Avoid ignoring GUC *name* if it does not have a validator in *validators*, but is a valid GUC in Postgres
-            *version*.
+          *version*.
 
     :returns: the return value may be one among:
-        * *value* transformed to the expected format for GUC *name* in Postgres *version*, if *name* is present in
-            *available_gucs* and has a validator in *validators* for the corresponding Postgres *version*; or
+
+        * *value* transformed to the expected format for GUC *name* in Postgres *version*, if *name* is present
+          in *available_gucs* and has a validator in *validators* for the corresponding Postgres *version*; or
         * The own *value* if *name* is present in *available_gucs* but not in *validators*; or
         * ``None`` if *name* is not present in *available_gucs*.
     """
@@ -462,11 +470,13 @@ def transform_postgresql_parameter_value(version: int, name: str, value: Any,
     :param value: value of the Postgres GUC.
     :param available_gucs: a set of all GUCs available in Postgres *version*. Each item is the name of a Postgres
         GUC. Used for a couple purposes:
-        * Disallow writing GUCs to ``postgresql.conf`` that does not exist in Postgres *version*;
-        * Avoid ignoring GUC *name* if it does not have a validator in ``parameters``, but is a valid GUC in Postgres
-            *version*.
 
-    :returns: The return value may be one among
+            * Disallow writing GUCs to ``postgresql.conf`` that does not exist in Postgres *version*;
+            * Avoid ignoring GUC *name* if it does not have a validator in ``parameters``, but is a valid GUC in
+                Postgres *version*.
+
+    :returns: The return value may be one among:
+
         * The original *value* if *name* seems to be an extension GUC (contains a period '.'); or
         * ``None`` if **name** is a recovery GUC; or
         * *value* transformed to the expected format for GUC *name* in Postgres *version* using validators defined in
@@ -490,10 +500,11 @@ def transform_recovery_parameter_value(version: int, name: str, value: Any,
     :param value: value of the Postgres recovery GUC.
     :param available_gucs: a set of all GUCs available in Postgres *version*. Each item is the name of a Postgres
         GUC. Used for a couple purposes:
-        * Disallow writing GUCs to ``recovery.conf`` (or ``postgresql.conf`` depending on *version*), that does not
-        exist in Postgres *version*;
-        * Avoid ignoring recovery GUC *name* if it does not have a validator in ``recovery_parameters``, but is a valid
-            GUC in Postgres *version*.
+
+            * Disallow writing GUCs to ``recovery.conf`` (or ``postgresql.conf`` depending on *version*), that does not
+                exist in Postgres *version*;
+            * Avoid ignoring recovery GUC *name* if it does not have a validator in ``recovery_parameters``, but is a
+                valid GUC in Postgres *version*.
 
     :returns: *value* transformed to the expected format for recovery GUC *name* in Postgres *version* using validators
         defined in ``recovery_parameters``. It can also return ``None``. See :func:`_transform_parameter_value`.

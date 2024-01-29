@@ -1,14 +1,16 @@
 import select
 import unittest
 
-from kazoo.client import KazooClient, KazooState
+from kazoo.client import KazooClient
 from kazoo.exceptions import NoNodeError, NodeExistsError
 from kazoo.handlers.threading import SequentialThreadingHandler
-from kazoo.protocol.states import KeeperState, ZnodeStat
+from kazoo.protocol.states import KeeperState, WatchedEvent, ZnodeStat
 from kazoo.retry import RetryFailedError
 from mock import Mock, PropertyMock, patch
-from patroni.dcs.zookeeper import Cluster, Leader, PatroniKazooClient,\
+from patroni.dcs import get_dcs
+from patroni.dcs.zookeeper import Cluster, PatroniKazooClient, \
     PatroniSequentialThreadingHandler, ZooKeeper, ZooKeeperError
+from patroni.postgresql.mpp import get_mpp
 
 
 class MockKazooClient(Mock):
@@ -148,12 +150,9 @@ class TestZooKeeper(unittest.TestCase):
 
     @patch('patroni.dcs.zookeeper.PatroniKazooClient', MockKazooClient)
     def setUp(self):
-        self.zk = ZooKeeper({'hosts': ['localhost:2181'], 'scope': 'test',
-                             'name': 'foo', 'ttl': 30, 'retry_timeout': 10, 'loop_wait': 10,
-                             'set_acls': {'CN=principal2': ['ALL']}})
-
-    def test_session_listener(self):
-        self.zk.session_listener(KazooState.SUSPENDED)
+        self.zk = get_dcs({'scope': 'test', 'name': 'foo', 'ttl': 30, 'retry_timeout': 10, 'loop_wait': 10,
+                           'zookeeper': {'hosts': ['localhost:2181'], 'set_acls': {'CN=principal2': ['ALL']}}})
+        self.assertIsInstance(self.zk, ZooKeeper)
 
     def test_reload_config(self):
         self.zk.reload_config({'ttl': 20, 'retry_timeout': 10, 'loop_wait': 10})
@@ -176,20 +175,11 @@ class TestZooKeeper(unittest.TestCase):
         self.zk._cluster_loader(self.zk.client_path(''))
 
     def test_get_cluster(self):
-        cluster = self.zk.get_cluster(True)
-        self.assertIsInstance(cluster.leader, Leader)
-        self.zk.status_watcher(None)
-        self.zk.get_cluster()
-        self.zk.touch_member({'foo': 'foo'})
-        self.zk._name = 'bar'
-        self.zk.status_watcher(None)
-        with patch.object(ZooKeeper, 'get_node', Mock(side_effect=Exception)):
-            self.zk.get_cluster()
         cluster = self.zk.get_cluster()
         self.assertEqual(cluster.last_lsn, 500)
 
     def test__get_citus_cluster(self):
-        self.zk._citus_group = '0'
+        self.zk._mpp = get_mpp({'citus': {'group': 0, 'database': 'postgres'}})
         for _ in range(0, 2):
             cluster = self.zk.get_cluster()
             self.assertIsInstance(cluster, Cluster)
@@ -202,7 +192,7 @@ class TestZooKeeper(unittest.TestCase):
         mock_logger.assert_called_once()
 
     def test_delete_leader(self):
-        self.assertTrue(self.zk.delete_leader())
+        self.assertTrue(self.zk.delete_leader(self.zk.get_cluster().leader))
 
     def test_set_failover_value(self):
         self.zk.set_failover_value('')
@@ -276,6 +266,7 @@ class TestZooKeeper(unittest.TestCase):
         self.assertTrue(self.zk.delete_cluster())
 
     def test_watch(self):
+        self.zk.event.wait = Mock()
         self.zk.watch(None, 0)
         self.zk.event.is_set = Mock(return_value=True)
         self.zk._fetch_status = False
@@ -294,3 +285,7 @@ class TestZooKeeper(unittest.TestCase):
 
     def test_set_history_value(self):
         self.zk.set_history_value('{}')
+
+    def test_watcher(self):
+        self.zk._watcher(WatchedEvent('', '', ''))
+        self.assertTrue(self.zk.watch(1, 1))
