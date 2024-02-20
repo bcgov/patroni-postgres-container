@@ -1,5 +1,6 @@
 #!/bin/sh
 
+UID=$(id -u)
 if [ "$UID" -ge "10000" ]; then
     GID=$(id -g)
     sed -e "s/^postgres:x:[^:]*:[^:]*:/postgres:x:$UID:$GID:/" /etc/passwd > /tmp/passwd
