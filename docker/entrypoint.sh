@@ -1,5 +1,12 @@
 #!/bin/sh
 
+if [[ $UID -ge 10000 ]]; then
+    GID=$(id -g)
+    sed -e "s/^postgres:x:[^:]*:[^:]*:/postgres:x:$UID:$GID:/" /etc/passwd > /tmp/passwd
+    cat /tmp/passwd > /etc/passwd
+    rm /tmp/passwd
+fi
+
 if [ -f /a.tar.xz ]; then
     echo "decompressing image..."
     sudo tar xpJf /a.tar.xz -C / > /dev/null 2>&1

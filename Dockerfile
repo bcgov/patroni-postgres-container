@@ -46,6 +46,8 @@ RUN find /usr/share/i18n/charmaps/ -type f ! -name UTF-8.gz -delete \
     && sed -i "s|/var/lib/postgresql.*|$PGHOME:/bin/bash|" /etc/passwd \
     && chown -R postgres:postgres /var/log
 
+RUN chmod 664 /etc/passwd
+
     # Download etcd
 RUN curl -sL https://github.com/coreos/etcd/releases/download/v${ETCDVERSION}/etcd-v${ETCDVERSION}-linux-amd64.tar.gz \
             | tar xz -C /usr/local/bin --strip=1 --wildcards --no-anchored etcd etcdctl \
