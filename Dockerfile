@@ -44,8 +44,7 @@ RUN find /usr/share/i18n/charmaps/ -type f ! -name UTF-8.gz -delete \
     && ln -s ../../postgres0.yml $PGHOME/.config/patroni/patronictl.yaml \
     && ln -s /patronictl.py /usr/local/bin/patronictl \
     && sed -i "s|/var/lib/postgresql.*|$PGHOME:/bin/bash|" /etc/passwd \
-    && chown -R postgres:postgres /var/log \
-    && touch $PGHOME/etcd.log && ln -s $PGHOME/etcd.log /var/log/etcd.log
+    && chmod 777 /var/log 
 
 RUN chmod 664 /etc/passwd
 
