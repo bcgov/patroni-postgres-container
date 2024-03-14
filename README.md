@@ -1,20 +1,16 @@
 # TL;DR
 
-This repo contains the Platform Service (PS) and community maintained version of PostgreSQL managed by Patroni for High Availability (HA). You will find this image in the `bcgov` namespace on all PS managed clusters.
-
-```console
-oc get is -n bcgov
-```
+This repo contains the Platform Service (PS) and community maintained version of PostgreSQL managed by Patroni for High Availability (HA).  The image is available from Artifactory.
 
 You will find a sample of how to deploy the image [here](./samples/README.md).
 
 # Image Management
 
-This image is based on PostgreSQL v12.4. It will be periodically rebuilt acording to the `cron` schedule in the workflow. When it is rebuilt, [patch](https://semver.org/) updates as well as operating security fixes will be incorporated and redistributed to all clusters via the [stable tag](https://docs.microsoft.com/en-us/azure/container-registry/container-registry-image-tag-version).
+This image is based on PostgreSQL v12.4.  Due to this being an old version of both Patroni and Postgres, we no longer automatically rebuild it to pick up software updates, because the Dockerfile no longer builds, due to software version changes.  We are planning on providing updated information soon.
 
 ## Tags
 
-The stable tag for this image is `2.0.1-12.4-latest`. When the image is rebuilt [patch](https://semver.org/) updates to PostgreSQL will be incorporated along with operating system updates.
+The stable tag for this image is `2.0.1-12.4-latest`.
 
 See the [release notes](./RELEASE.md) for more information and any other unique tags. 
 
@@ -23,20 +19,17 @@ See the [release notes](./RELEASE.md) for more information and any other unique 
 Below is a sample of how you might reference this image from a `StatefulSet` deployment manifest. 
 
 ```yaml
-  image: image-registry.openshift-image-registry.svc:5000/bcgov/patroni-postgres:12.4-latest
+  image: artifacts.developer.gov.bc.ca/bcgov-docker-local/patroni-postgres:2.0.1-12.4-latest
 ```
 
 Find a sample StatefulSet deployment [here](./samples/README.md).
-
-**ProTip 🤓**
-
-Use the **internal** host for the `bcgov` image catalog; if you use the external one (contains gov.bc.ca) you'll need to authenticate.
 
 # Build
 
 This image is built as per the [workflow](.github/workflows/image.yaml) and the OpenShift [templates](./openshift/templates).
 
 ## Distribution
+This is the old section that describes copying the image to your local namespace.
 
 Run RBAC to create an SA and bind it to, this is done on a lab or build cluster:
 
